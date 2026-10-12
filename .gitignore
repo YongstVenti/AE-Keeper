@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.spec
+data/
+demo-data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*-备份-*.json
+*.log
+
+# Local credentials and personal exports
+.env
+.env.*
+*.pem
+*.key
+backups/
+profiles/
+*.exe
+*.zip
