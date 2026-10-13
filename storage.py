@@ -9,7 +9,8 @@ from workspace_model import clean_workspace
 
 DEFAULTS = {'enabled': True, 'interval': 60, 'mode': 'auto', 'limit_mb': 100, 'retention': 90,
             'chrome_root': '', 'edge_root': '', 'startup': False, 'include_all_profiles': False,
-            'workspace_enabled': True, 'workspace_limit_mb': 20}
+            'workspace_enabled': True, 'workspace_limit_mb': 20,
+            'workspace_include_minimized': True, 'workspace_previews': True}
 
 
 def safe_url(value):

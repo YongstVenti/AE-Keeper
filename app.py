@@ -55,7 +55,7 @@ def set_startup(enabled):
 
 
 class App:
-    def __init__(self, folder, demo=False, start_hidden=False, initial_view='tabs'):
+    def __init__(self, folder, demo=False, start_hidden=False, initial_view='tabs', capture_workspace=False):
         self.root = tk.Tk()
         self.root.title(APP_NAME + ('（演示）' if demo else ''))
         apply_icon(self.root)
@@ -67,6 +67,8 @@ class App:
         self.engine = Engine(folder, self.output, demo)
         self.view, self.rows, self.settings = 'tabs', {}, {}
         self.current, self.stats, self.tray = [], {}, None
+        self.preview_new_workspace = capture_workspace
+        self.preview_workspace_ready = False
         self.heading_family = load_heading_font(self.root)
         self.active_browser = None
         self.rendered_view = None
@@ -111,6 +113,8 @@ class App:
         self.root.protocol('WM_DELETE_WINDOW', self.hide)
         self.root.after(100, self.poll)
         self.engine.start()
+        if capture_workspace:
+            self.engine.submit('workspace_save')
         self.make_tray()
         if start_hidden:
             self.root.after(500, self.hide)
@@ -622,7 +626,10 @@ class App:
                 if kind == 'state':
                     self.settings, self.current, self.stats = event['settings'], event['current'], event['stats']
                     self.workspace_pane.enabled.set(self.settings.get('workspace_enabled', True))
-                    self.workspace_pane.hint.configure(text=f"只记录打开且未最小化的窗口 · 每 {self.settings['interval']} 秒更新当天一份 · 手动保留不会覆盖 · 被遮住也会保存")
+                    self.workspace_pane.include_minimized.set(self.settings.get('workspace_include_minimized', True))
+                    self.workspace_pane.previews_enabled.set(self.settings.get('workspace_previews', True))
+                    scope = '包含任务栏中的最小化窗口' if self.settings.get('workspace_include_minimized', True) else '排除最小化窗口'
+                    self.workspace_pane.hint.configure(text=f"{scope} · 每 {self.settings['interval']} 秒更新当天一份 · 最小化时沿用上次可读预览，手动拍摄可更新全部画面")
                     for browser in self.connection_vars:
                         status = event['status'][browser]
                         if status.startswith('已连接'):
@@ -641,7 +648,13 @@ class App:
                         self.refresh()
                 elif kind == 'list' and event['view'] == self.view:
                     self.show_rows(event['rows'])
+                    if self.view == 'workspaces' and self.preview_new_workspace and self.preview_workspace_ready and event['rows']:
+                        self.preview_new_workspace = False
+                        self.workspace_pane.tree.selection_set(str(event['rows'][0]['id']))
+                        self.workspace_pane.preview()
                 elif kind == 'workspace_saved' and self.view == 'workspaces':
+                    if event.get('manual'):
+                        self.preview_workspace_ready = True
                     self.workspace_pane.refresh()
                 elif kind == 'workspace_restored':
                     self.message_var.set(f"已请求恢复 {event['opened']} 组工作窗口。")
@@ -766,10 +779,13 @@ if (Test-Path -LiteralPath $taskOld) {{
 
 
 def main(force_app=False):
+    import multiprocessing
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser()
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--tray', action='store_true')
     parser.add_argument('--workspaces', action='store_true', help='打开工作现场栏目')
+    parser.add_argument('--capture-workspace', action='store_true', help='拍摄并预览一份当前工作现场，包含最小化窗口')
     parser.add_argument('--data-dir')
     parser.add_argument('--install', action='store_true')
     args = parser.parse_args()
@@ -790,7 +806,8 @@ def main(force_app=False):
             messagebox.showinfo(APP_NAME, '软件已经在运行，请从任务栏右下角的托盘图标打开。')
             root.destroy()
             return
-    App(folder, args.demo, args.tray, initial_view='workspaces' if args.workspaces else 'tabs').run()
+    App(folder, args.demo, args.tray, initial_view='workspaces' if args.workspaces or args.capture_workspace else 'tabs',
+        capture_workspace=args.capture_workspace).run()
 
 
 if __name__ == '__main__':

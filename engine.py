@@ -10,6 +10,7 @@ from browser_setup import open_settings, SETTINGS_URLS
 from storage import Archive, safe_url
 from desktop_windows import capture_desktop, restore_desktop
 from workspace_model import demo_workspace, workspace_counts
+from window_previews import attach_previews
 
 
 def default_roots():
@@ -135,7 +136,14 @@ class Engine(threading.Thread):
                   fallback=self.archive.meta('fallback', False))
 
     def save_workspace(self, manual=False):
-        payload = demo_workspace() if self.demo else capture_desktop()
+        settings = self.archive.settings()
+        payload = demo_workspace() if self.demo else capture_desktop(include_minimized=settings['workspace_include_minimized'])
+        if not self.demo:
+            previous = self.archive.listing('workspaces', limit=1)
+            if manual and settings['workspace_previews']:
+                self.emit('message', text='正在拍摄全部窗口；会短暂显示预览板，不会展开或切换原窗口。')
+            payload = attach_previews(payload, previous[0]['payload'] if previous else None,
+                                      enabled=settings['workspace_previews'], interactive=manual)
         result = self.archive.capture_workspace(payload, manual=manual)
         self.last_workspace_capture = time.monotonic()
         if manual:
@@ -258,6 +266,11 @@ class Engine(threading.Thread):
         elif action == 'workspace_enabled':
             self.archive.save_settings({'workspace_enabled': bool(values['enabled'])})
             self.emit('message', text='工作现场自动保存已开启。' if values['enabled'] else '工作现场自动保存已暂停。')
+        elif action == 'workspace_options':
+            values = {key: bool(values[key]) for key in ('workspace_include_minimized', 'workspace_previews') if key in values}
+            self.archive.save_settings(values)
+            self.last_workspace_capture = 0
+            self.emit('message', text='窗口保存范围与预览设置已更新。')
         elif action == 'workspace_restore':
             if self.demo:
                 self.emit('message', text='演示模式不会打开真实工作窗口。')

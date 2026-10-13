@@ -1,4 +1,4 @@
-"""Local desktop inventory. Never capture buffers, credentials or command lines.
+"""Local desktop metadata; process command lines are never recorded.
 
 Explorer tabs use Shell COM; tab creation is restricted to a newly opened window.
 Terminal sessions use process directories, which may differ from shell logical pwd.
@@ -32,6 +32,7 @@ def user32():
     api.IsWindowVisible.argtypes = [wintypes.HWND]
     api.IsIconic.argtypes = [wintypes.HWND]
     api.IsZoomed.argtypes = [wintypes.HWND]
+    api.IsHungAppWindow.argtypes = [wintypes.HWND]
     api.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     api.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     api.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
@@ -45,9 +46,9 @@ def user32():
     return api
 
 
-def window_included(info, own_pid):
-    return (info['visible'] and not info['minimized'] and not info['cloaked']
-            and not info['tool'] and not info['owned'] and bool(info['title'])
+def window_included(info, own_pid, include_minimized=False):
+    return (info['visible'] and (include_minimized or not info['minimized']) and not info['cloaked']
+            and not info['tool'] and (not info['owned'] or info.get('appwindow', False)) and bool(info['title'])
             and info['pid'] != own_pid and info['class'] not in IGNORED_CLASSES
             and info.get('app', '').lower() not in IGNORED_APPS)
 
@@ -81,9 +82,8 @@ def native_windows(include_minimized=False):
                         title=title.value, **{'class': cls.value}, app=p.name(), exe=p.exe(),
                         visible=True, minimized=bool(api.IsIconic(hwnd)),
                         cloaked=bool(cloaked.value), tool=bool(api.GetWindowLongPtrW(hwnd, -20) & 0x80),
-                        owned=bool(api.GetWindow(hwnd, 4)))
-            check = {**info, 'minimized': False} if include_minimized else info
-            if not window_included(check, os.getpid()):
+                        owned=bool(api.GetWindow(hwnd, 4)), appwindow=bool(api.GetWindowLongPtrW(hwnd, -20) & 0x40000))
+            if not window_included(info, os.getpid(), include_minimized):
                 return True
             placement = Placement(); placement.length = ctypes.sizeof(placement)
             if api.GetWindowPlacement(hwnd, ctypes.byref(placement)):
@@ -91,7 +91,7 @@ def native_windows(include_minimized=False):
             else:
                 rect = wintypes.RECT(); api.GetWindowRect(hwnd, ctypes.byref(rect))
             info.update(rect=[rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top],
-                        maximized=bool(api.IsZoomed(hwnd)))
+                        maximized=bool(api.IsZoomed(hwnd) or (info['minimized'] and placement.flags & 2)))
             if info['rect'][2] <= 0 or info['rect'][3] <= 0:
                 return True
             rows.append(info)
@@ -132,7 +132,7 @@ def terminal_sessions(pid):
     return result
 
 
-def capture_desktop():
+def capture_desktop(include_minimized=True):
     if os.name != 'nt':
         raise RuntimeError('工作现场目前只支持 Windows。')
     import pythoncom
@@ -147,9 +147,9 @@ def capture_desktop():
             shell = None
             warnings.append('资源管理器标签页读取失败，未推测缺失路径。')
         for info in all_windows:
-            if info['minimized']:
+            if info['minimized'] and not include_minimized:
                 continue
-            row = {k: info[k] for k in ('hwnd', 'pid', 'created', 'title', 'app', 'exe', 'rect', 'maximized')}
+            row = {k: info[k] for k in ('hwnd', 'pid', 'created', 'title', 'app', 'exe', 'rect', 'maximized', 'minimized')}
             row.update(kind='app', tabs=[], sessions=[], detail='只能重新打开软件，文档和未保存内容不在此存档内')
             name = info['app'].lower()
             if info['class'] == 'CabinetWClass':
@@ -218,6 +218,8 @@ def place_window(hwnd, row):
     api.SetWindowPos(hwnd, None, x, y, width, height, 0x0014)  # no activation/z-order changes
     if row.get('maximized'):
         api.ShowWindow(hwnd, 3)
+    if row.get('minimized'):
+        api.ShowWindow(hwnd, 7)  # restore the original taskbar state without activation
 
 
 def _new_explorer(shell, path):

@@ -7,6 +7,7 @@ from branding import BG, apply_icon
 from desktop_windows import restorable
 from window_effects import apply_window_effects
 from workspace_model import workspace_counts
+from workspace_gallery import WorkspaceGallery
 
 LABELS = {'explorer': '资源管理器', 'terminal': 'Windows 终端', 'console': '控制台',
           'app': '软件', 'browser': '浏览器'}
@@ -22,15 +23,22 @@ class WorkspacePane:
         self.frame = ttk.Frame(parent)
         self.rows = {}
         self.enabled = tk.BooleanVar(value=True)
+        self.include_minimized = tk.BooleanVar(value=True)
+        self.previews_enabled = tk.BooleanVar(value=True)
         bar = ttk.Frame(self.frame)
         bar.pack(fill='x', pady=(0, 10))
         ttk.Label(bar, text='工作现场', font=(font_family, 18)).pack(side='left')
-        ttk.Button(bar, text='保留现在的工作现场', style='Accent.TButton',
+        ttk.Button(bar, text='拍摄并保留全部窗口', style='Accent.TButton',
                    command=lambda: engine.submit('workspace_save')).pack(side='right')
-        ttk.Checkbutton(bar, text='自动保存当天最新', variable=self.enabled,
-                        command=lambda: engine.submit('workspace_enabled', enabled=self.enabled.get())).pack(side='right', padx=18)
+        options = ttk.Frame(self.frame); options.pack(fill='x', pady=(0, 10))
+        ttk.Checkbutton(options, text='自动保存当天最新', variable=self.enabled,
+                        command=lambda: engine.submit('workspace_enabled', enabled=self.enabled.get())).pack(side='left')
+        ttk.Checkbutton(options, text='包含任务栏中的最小化窗口', variable=self.include_minimized,
+                        command=lambda: engine.submit('workspace_options', workspace_include_minimized=self.include_minimized.get())).pack(side='left', padx=18)
+        ttk.Checkbutton(options, text='保存窗口预览图', variable=self.previews_enabled,
+                        command=lambda: engine.submit('workspace_options', workspace_previews=self.previews_enabled.get())).pack(side='left')
         self.hint = ttk.Label(self.frame, style='Muted.TLabel', wraplength=1120,
-                             text='只记录打开且未最小化的窗口；被其他窗口遮住也会保存。每天一份自动最新，手动保留的不会覆盖。')
+                             text='包含任务栏窗口，排除只有托盘图标的程序。定时保留最小化窗口上次可读画面；手动拍摄会短暂显示预览板。')
         self.hint.pack(anchor='w', pady=(0, 10))
         filters = ttk.Frame(self.frame); filters.pack(fill='x', pady=(0, 10))
         self.query, self.day = tk.StringVar(), tk.StringVar()
@@ -42,7 +50,7 @@ class WorkspacePane:
         ttk.Button(filters, text='查找存档', command=self.refresh).pack(side='left')
         ttk.Button(filters, text='清空筛选', style='Quiet.TButton', command=self.clear).pack(side='left', padx=8)
         body = ttk.Frame(self.frame, style='Rounded.TFrame', padding=12); body.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(body, columns=('time', 'mode', 'counts', 'note'), show='headings', selectmode='browse')
+        self.tree = ttk.Treeview(body, columns=('time', 'mode', 'counts', 'note'), show='headings', selectmode='browse', height=2)
         for col, title, width in [('time', '保存时间', 210), ('mode', '保存方式', 140),
                                   ('counts', '窗口 / 文件夹标签 / 终端会话', 420), ('note', '备注', 280)]:
             self.tree.heading(col, text=title); self.tree.column(col, width=width, minwidth=100, stretch=col in ('counts', 'note'))
@@ -92,13 +100,18 @@ class WorkspacePane:
         if not row:
             self.message.set('请先选中一份工作现场。'); return
         win = tk.Toplevel(self.frame); win.title('工作现场 · ' + time_text(row['time']))
-        win.geometry('1150x680'); win.minsize(980, 550); win.configure(bg=BG)
+        win.geometry('1320x850'); win.minsize(980, 650); win.configure(bg=BG)
         apply_icon(win); apply_window_effects(win)
         body = ttk.Frame(win, padding=20); body.pack(fill='both', expand=True)
-        ttk.Label(body, text='选择要恢复的工作窗口', font=(self.font_family, 18)).pack(anchor='w')
-        ttk.Label(body, text='点击窗口前的方框选择；展开查看文件夹和终端目录。默认选择资源管理器及终端，其他软件可手动勾选。',
+        windows = row['payload']['windows']
+        images = sum(bool(w.get('preview', {}).get('image')) for w in windows)
+        minimized = sum(bool(w.get('minimized')) for w in windows)
+        ttk.Label(body, text=f'工作窗口 · {len(windows)} 个窗口 · {images} 张预览 · {minimized} 个已最小化', font=(self.font_family, 18)).pack(anchor='w')
+        ttk.Label(body, text='勾选要恢复的窗口；双击画面查看大图。“详细清单”里可以展开文件夹和终端目录。旧存档不会补造当时的画面。',
                   style='Muted.TLabel', wraplength=1070).pack(anchor='w', pady=12)
-        table = ttk.Frame(body); table.pack(fill='both', expand=True)
+        viewbar = ttk.Frame(body); viewbar.pack(fill='x', pady=(0, 10))
+        views = ttk.Frame(body); views.pack(fill='both', expand=True)
+        table = ttk.Frame(views)
         tree = ttk.Treeview(table, columns=('type', 'path', 'detail'), show='tree headings', selectmode='browse')
         tree.heading('#0', text='选择 / 窗口与标签'); tree.column('#0', width=240, minwidth=180)
         for col, label, width in [('type', '类型', 130), ('path', '路径 / 工作目录', 330), ('detail', '能恢复什么', 390)]:
@@ -106,6 +119,7 @@ class WorkspacePane:
         scroll = ttk.Scrollbar(table, orient='vertical', command=tree.yview); tree.configure(yscrollcommand=scroll.set)
         tree.pack(side='left', fill='both', expand=True); scroll.pack(side='right', fill='y')
         selected, available = set(), set()
+        gallery = None
         for index, window in enumerate(row['payload']['windows']):
             allowed = restorable(window) or self.engine.demo and window['kind'] != 'browser'
             if allowed:
@@ -136,7 +150,19 @@ class WorkspacePane:
                 selected.add(index)
             window = row['payload']['windows'][index]
             tree.item(iid, text=('☑' if index in selected else '☐') + '  ' + (window['title'] or window['app']))
+            gallery.sync(index)
         tree.bind('<Button-1>', toggle)
+        def changed(index):
+            window = windows[index]
+            tree.item(str(index), text=('☑' if index in selected else '☐') + '  ' + (window['title'] or window['app']))
+        gallery = WorkspaceGallery(views, windows, selected, available, self.font_family, changed)
+        def mode(cards):
+            table.pack_forget(); gallery.frame.pack_forget()
+            (gallery.frame if cards else table).pack(fill='both', expand=True)
+        ttk.Button(viewbar, text='窗口预览', command=lambda: mode(True)).pack(side='left')
+        ttk.Button(viewbar, text='详细清单', command=lambda: mode(False)).pack(side='left', padx=10)
+        ttk.Label(viewbar, text='画面与窗口信息已分开保存；可恢复范围见详细清单', style='Muted.TLabel').pack(side='right')
+        mode(True)
         ttk.Label(body, text='浏览器的网页请从“每日存档”恢复。现有窗口会保留；不会自动运行存档时的命令。',
                   style='Muted.TLabel', wraplength=1070).pack(anchor='w', pady=10)
         bar = ttk.Frame(body); bar.pack(fill='x')
@@ -148,6 +174,7 @@ class WorkspacePane:
         ttk.Button(bar, text='恢复选中的工作窗口', style='Accent.TButton', command=restore).pack(side='right')
         ttk.Button(bar, text='关闭', command=win.destroy).pack(side='right', padx=10)
         win.workspace_tree, win.workspace_selected = tree, selected
+        win.workspace_gallery, win.workspace_mode = gallery, mode
         self.preview_window = win
 
     def note(self):
