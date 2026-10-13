@@ -135,21 +135,22 @@ class Engine(threading.Thread):
                   last_workspace_saved=self.archive.meta('last_workspace_saved'),
                   fallback=self.archive.meta('fallback', False))
 
-    def save_workspace(self, manual=False):
+    def save_workspace(self, manual=False, interactive=None):
+        interactive = manual if interactive is None else interactive
         settings = self.archive.settings()
         payload = demo_workspace() if self.demo else capture_desktop(include_minimized=settings['workspace_include_minimized'])
         if not self.demo:
             previous = self.archive.listing('workspaces', limit=1)
-            if manual and settings['workspace_previews']:
+            if interactive and settings['workspace_previews']:
                 self.emit('message', text='正在拍摄全部窗口；会短暂显示预览板，不会展开或切换原窗口。')
             payload = attach_previews(payload, previous[0]['payload'] if previous else None,
-                                      enabled=settings['workspace_previews'], interactive=manual, options=settings)
+                                      enabled=settings['workspace_previews'], interactive=interactive, options=settings)
         result = self.archive.capture_workspace(payload, manual=manual)
         self.last_workspace_capture = time.monotonic()
-        if manual:
+        if interactive:
             windows, tabs, sessions = workspace_counts(payload)
-            self.emit('message', text=f'工作现场已保留：{windows} 个窗口、{tabs} 个文件夹标签、{sessions} 个终端会话。' if result
-                      else '当前没有可保存的非最小化窗口；之前的工作现场已保留。')
+            self.emit('message', text=f'桌面窗口已保留：{windows} 个窗口、{tabs} 个文件夹标签、{sessions} 个终端会话。' if result
+                      else '当前没有可保存的非最小化窗口；之前的桌面窗口已保留。')
         if result:
             self.emit('workspace_saved', manual=manual)
         return result
@@ -258,14 +259,14 @@ class Engine(threading.Thread):
         elif action == 'save':
             browser_saved = self.save()
             desktop_saved = self.save_workspace(manual=True)
-            self.emit('message', text=('浏览器快照及工作现场已保存。' if browser_saved and desktop_saved else
-                                      '工作现场已保存；浏览器尚未连接。' if desktop_saved else
+            self.emit('message', text=('浏览器快照及桌面窗口已保存。' if browser_saved and desktop_saved else
+                                      '桌面窗口已保存；浏览器尚未连接。' if desktop_saved else
                                       '浏览器快照已保存；没有可保存的工作窗口。' if browser_saved else '当前没有可保存的窗口。'))
         elif action == 'workspace_save':
-            self.save_workspace(manual=True)
+            self.save_workspace(manual=not values.get('daily', False), interactive=True)
         elif action == 'workspace_enabled':
             self.archive.save_settings({'workspace_enabled': bool(values['enabled'])})
-            self.emit('message', text='工作现场自动保存已开启。' if values['enabled'] else '工作现场自动保存已暂停。')
+            self.emit('message', text='桌面窗口自动保存已开启。' if values['enabled'] else '桌面窗口自动保存已暂停。')
         elif action == 'workspace_options':
             values = {key: bool(values[key]) for key in ('workspace_include_minimized', 'workspace_previews') if key in values}
             self.archive.save_settings(values)
@@ -280,7 +281,7 @@ class Engine(threading.Thread):
                                          progress=lambda text: self.emit('message', text=text))
                 self.emit('workspace_restored', **result)
         elif action == 'list':
-            self.emit('list', view=values['view'], rows=self.archive.listing(values['view'], values.get('query', ''), values.get('day', ''), thumbnails_only=values['view'] == 'workspaces'))
+            self.emit('list', view=values['view'], rows=self.archive.listing(values['view'], values.get('query', ''), values.get('day', ''), thumbnails_only=values['view'] in ('workspaces', 'workspace_daily')))
         elif action == 'settings':
             previous = self.archive.settings()
             saved = self.archive.save_settings(values['value'])

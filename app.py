@@ -66,6 +66,7 @@ class App:
         self.output = queue.Queue()
         self.engine = Engine(folder, self.output, demo)
         self.view, self.rows, self.settings = 'tabs', {}, {}
+        self.daily_view = 'daily'
         self.current, self.stats, self.tray = [], {}, None
         self.preview_new_workspace = capture_workspace
         self.preview_workspace_ready = False
@@ -128,7 +129,7 @@ class App:
         ttk.Label(brand, image=self.brand_logo).pack(side='left',padx=(0,14))
         copy=ttk.Frame(brand);copy.pack(side='left')
         ttk.Label(copy, text=NAME, style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(copy, text='网页与工作现场 · 按天归档，随时找回', style='Muted.TLabel').pack(anchor='w', pady=(3, 0))
+        ttk.Label(copy, text='网页与桌面窗口 · 按天归档，随时找回', style='Muted.TLabel').pack(anchor='w', pady=(3, 0))
         ttk.Button(top, text='现在保存', style='Primary.TButton', command=lambda: self.engine.submit('save')).pack(side='right')
         ttk.Button(top, text='连接两个浏览器', command=lambda: self.engine.submit('connect_both')).pack(side='right', padx=10)
         ttk.Button(top, text='导出备份', style='Quiet.TButton', command=self.export).pack(side='right', padx=8)
@@ -140,13 +141,19 @@ class App:
         nav = ttk.Frame(self.root, padding=(24, 0))
         nav.pack(fill='x')
         self.nav_buttons = {}
-        for key, title in [('tabs', '当前标签页'), ('daily', '每日存档'), ('workspaces', '工作现场'), ('snapshots', '窗口快照'), ('visits', '浏览记录'), ('bookmarks', '收藏夹'), ('settings', '保存设置')]:
-            button = ttk.Button(nav, text=title, style='Nav.TButton', command=lambda k=key: self.switch(k))
+        for key, title in [('tabs', '浏览器标签页'), ('workspaces', '桌面窗口'), ('daily', '每日存档'), ('snapshots', '窗口快照'), ('visits', '浏览记录'), ('bookmarks', '收藏夹'), ('settings', '保存设置')]:
+            button = ttk.Button(nav, text=title, style='Nav.TButton', command=lambda k=key: self.switch(self.daily_view if k == 'daily' else k))
             button.pack(side='left', padx=(0, 8))
             self.nav_buttons[key] = button
         self.content = ttk.Frame(self.root, padding=(24, 12))
         self.content.pack(fill='both', expand=True)
         self.filter_bar = ttk.Frame(self.content)
+        self.daily_selector = ttk.Frame(self.content)
+        self.daily_buttons = {}
+        for key, title in [('daily', '浏览器页面'), ('workspace_daily', '桌面窗口')]:
+            button = ttk.Button(self.daily_selector, text=title, style='Nav.TButton', command=lambda k=key: self.switch(k))
+            button.pack(side='left', padx=(0, 10))
+            self.daily_buttons[key] = button
         self.daily_hint = ttk.Label(self.content, text='每天一个文件夹 · 父级显示主存档，展开可选其他快照 · 自动最新包含 Edge + Chrome 全部窗口',style='Muted.TLabel')
         ttk.Label(self.filter_bar, text='搜索').pack(side='left')
         self.search_entry = ttk.Entry(self.filter_bar, textvariable=self.search_var, width=34)
@@ -190,6 +197,7 @@ class App:
         self.count_label.pack(side='right')
         self.settings_frame = ttk.Frame(self.content)
         self.workspace_pane = WorkspacePane(self.content, self.engine, self.heading_family, self.message_var)
+        self.daily_workspace_pane = WorkspacePane(self.content, self.engine, self.heading_family, self.message_var, daily=True)
         footer = ttk.Frame(self.root, padding=(24, 10))
         footer.pack(fill='x')
         self.message_label = ttk.Label(footer, textvariable=self.message_var, style='Muted.TLabel', wraplength=950)
@@ -286,13 +294,23 @@ class App:
 
     def switch(self, view):
         self.view = view
+        if view in ('daily', 'workspace_daily'):
+            self.daily_view = view
         for key, button in self.nav_buttons.items():
-            button.configure(style='SelectedNav.TButton' if key == view else 'Nav.TButton')
-        for widget in (self.filter_bar, self.daily_hint, self.dual_frame, self.tree_frame, self.actions, self.settings_frame, self.workspace_pane.frame):
+            button.configure(style='SelectedNav.TButton' if key == ('daily' if view == 'workspace_daily' else view) else 'Nav.TButton')
+        for widget in (self.filter_bar, self.daily_hint, self.daily_selector, self.dual_frame, self.tree_frame, self.actions, self.settings_frame, self.workspace_pane.frame, self.daily_workspace_pane.frame):
             widget.pack_forget()
         for button in self.action_buttons.values():
             button.pack_forget()
         self.bookmark_button.pack_forget()
+        if view in ('daily', 'workspace_daily'):
+            self.daily_selector.pack(fill='x', pady=(0, 12))
+            for key, button in self.daily_buttons.items():
+                button.configure(style='SelectedNav.TButton' if key == view else 'Nav.TButton')
+        if view == 'workspace_daily':
+            self.daily_workspace_pane.frame.pack(fill='both', expand=True)
+            self.daily_workspace_pane.refresh()
+            return
         if view == 'workspaces':
             self.workspace_pane.frame.pack(fill='both', expand=True)
             self.workspace_pane.refresh()
@@ -330,7 +348,9 @@ class App:
         self.refresh()
 
     def refresh(self):
-        if self.view == 'workspaces':
+        if self.view == 'workspace_daily':
+            self.daily_workspace_pane.refresh()
+        elif self.view == 'workspaces':
             self.workspace_pane.refresh()
         elif self.view == 'tabs':
             self.show_rows(self.current)
@@ -338,6 +358,9 @@ class App:
             self.engine.submit('list', view=self.view, query=self.search_var.get().strip(), day=self.day_var.get().strip())
 
     def show_rows(self, rows, reset_scroll=False):
+        if self.view == 'workspace_daily':
+            self.daily_workspace_pane.update(rows)
+            return
         if self.view == 'workspaces':
             self.workspace_pane.update(rows)
             return
@@ -589,7 +612,7 @@ class App:
         ttk.Combobox(frame, textvariable=self.mode_var, values=list(modes.values()), state='readonly', width=32).grid(row=6, column=1, sticky='w', padx=18)
         ttk.Checkbutton(frame, text='开机启动软件并隐藏到托盘', variable=self.startup_var).grid(row=7, column=0, columnspan=2, sticky='w', pady=8)
         ttk.Checkbutton(frame, text='读取其他个人资料与无痕窗口（需重新连接）', variable=self.all_profiles_var).grid(row=8, column=0, columnspan=2, sticky='w', pady=8)
-        ttk.Label(frame, text='工作现场独立容量（MB，5—2000）').grid(row=9, column=0, sticky='w', pady=8)
+        ttk.Label(frame, text='桌面窗口独立容量（MB，5—2000）').grid(row=9, column=0, sticky='w', pady=8)
         ttk.Entry(frame, textvariable=self.form_vars['workspace_limit_mb'], width=25).grid(row=9, column=1, sticky='w', padx=18)
         images = ttk.Frame(frame, padding=(25, 0, 0, 0))
         images.grid(row=0, column=2, rowspan=10, sticky='nw')
@@ -600,7 +623,7 @@ class App:
             ttk.Label(images, text=label).grid(row=row, column=0, sticky='w', pady=10)
             ttk.Combobox(images, textvariable=var, values=options, state='readonly', width=24).grid(row=row, column=1, sticky='w', padx=10)
         ttk.Label(images, text='双击窗口卡片查看高清图，可切换原始比例。\n不放大小图；历史缩略图不会自动变高清。\n自动保存不展开窗口；最小化画面不可读时\n保留上次画面，显示原截图时间。\n手动拍摄可保存最小化窗口的高清画面。', style='Muted.TLabel', wraplength=370).grid(row=4, column=0, columnspan=2, sticky='w', pady=16)
-        ttk.Label(self.settings_frame, text='图片按内容去重，快照无损压缩。高清默认关闭；开启后仍受工作现场容量限制。调小容量会清理最早存档。\n保存任务视图中的窗口（可含最小化窗口），画面用于回顾；未保存文档及运行中的终端任务不能靠截图恢复。', style='Muted.TLabel', wraplength=1060).pack(anchor='w', pady=12)
+        ttk.Label(self.settings_frame, text='图片按内容去重，快照无损压缩。高清默认关闭；开启后仍受桌面窗口容量限制。调小容量会清理最早存档。\n保存任务视图中的窗口（可含最小化窗口），画面用于回顾；未保存文档及运行中的终端任务不能靠截图恢复。', style='Muted.TLabel', wraplength=1060).pack(anchor='w', pady=12)
         bar = ttk.Frame(self.settings_frame)
         bar.pack(fill='x')
         ttk.Button(bar, text='保存设置', style='Accent.TButton', command=lambda: self.save_settings(modes)).pack(side='left')
@@ -654,7 +677,7 @@ class App:
                     total = sum(v['bytes'] for v in self.stats.values()) / 1048576
                     size = f'{total:.2f}MB' if total >= 1 else f'{total * 1024:.0f}KB'
                     latest = max(event['last_saved'] or 0, event.get('last_workspace_saved') or 0)
-                    self.summary.configure(text=f"最近保存：{fmt_time(latest)}   |   网页存档 {self.stats.get('daily_archives',{}).get('count',0)} 天   |   工作现场 {self.stats.get('workspaces',{}).get('count',0)} 份   |   档案 {size}")
+                    self.summary.configure(text=f"最近保存：{fmt_time(latest)}   |   网页存档 {self.stats.get('daily_archives',{}).get('count',0)} 天   |   桌面存档 {self.stats.get('workspaces',{}).get('days',0)} 天   |   档案 {size}")
                     if event['fallback']:
                         self.message_var.set('浏览记录容量已满，继续保存窗口快照。可提高容量上限。')
                     if self.view == 'tabs':
@@ -662,20 +685,23 @@ class App:
                     elif self.view == 'daily' and getattr(self,'daily_refresh_time',None) != event['last_saved']:
                         self.daily_refresh_time = event['last_saved']
                         self.refresh()
+                    elif self.view == 'workspace_daily' and getattr(self,'desktop_daily_refresh_time',None) != event.get('last_workspace_saved'):
+                        self.desktop_daily_refresh_time = event.get('last_workspace_saved')
+                        self.refresh()
                 elif kind == 'list' and event['view'] == self.view:
                     self.show_rows(event['rows'])
                     if self.view == 'workspaces' and self.preview_new_workspace and self.preview_workspace_ready and event['rows']:
                         self.preview_new_workspace = False
                         self.workspace_pane.tree.selection_set(str(event['rows'][0]['id']))
                         self.workspace_pane.preview()
-                elif kind == 'workspace_saved' and self.view == 'workspaces':
+                elif kind == 'workspace_saved' and self.view in ('workspaces', 'workspace_daily'):
                     if event.get('manual'):
                         self.preview_workspace_ready = True
-                    self.workspace_pane.refresh()
+                    self.refresh()
                 elif kind == 'workspace_restored':
                     self.message_var.set(f"已请求恢复 {event['opened']} 组工作窗口。")
                     if event['messages']:
-                        messagebox.showinfo('工作现场恢复结果', '\n'.join(event['messages'])[:12000], parent=self.root)
+                        messagebox.showinfo('桌面窗口恢复结果', '\n'.join(event['messages'])[:12000], parent=self.root)
                 elif kind == 'daily_changed':
                     self.pending_daily_selection='day:'+event['day']
                     if not event.get('primary'):
@@ -800,8 +826,8 @@ def main(force_app=False):
     parser = argparse.ArgumentParser()
     parser.add_argument('--demo', action='store_true')
     parser.add_argument('--tray', action='store_true')
-    parser.add_argument('--workspaces', action='store_true', help='打开工作现场栏目')
-    parser.add_argument('--capture-workspace', action='store_true', help='拍摄并预览一份当前工作现场，包含最小化窗口')
+    parser.add_argument('--workspaces', action='store_true', help='打开桌面窗口栏目')
+    parser.add_argument('--capture-workspace', action='store_true', help='拍摄并预览一份当前桌面窗口，包含最小化窗口')
     parser.add_argument('--data-dir')
     parser.add_argument('--install', action='store_true')
     args = parser.parse_args()

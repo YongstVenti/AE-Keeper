@@ -19,8 +19,9 @@ def time_text(stamp):
 
 
 class WorkspacePane:
-    def __init__(self, parent, engine, font_family, message):
+    def __init__(self, parent, engine, font_family, message, daily=False):
         self.engine, self.font_family, self.message = engine, font_family, message
+        self.daily = daily
         self.frame = ttk.Frame(parent)
         self.rows = {}
         self.enabled = tk.BooleanVar(value=True)
@@ -28,9 +29,9 @@ class WorkspacePane:
         self.previews_enabled = tk.BooleanVar(value=True)
         bar = ttk.Frame(self.frame)
         bar.pack(fill='x', pady=(0, 10))
-        ttk.Label(bar, text='工作现场', font=(font_family, 18)).pack(side='left')
-        ttk.Button(bar, text='拍摄并保留全部窗口', style='Accent.TButton',
-                   command=lambda: engine.submit('workspace_save')).pack(side='right')
+        ttk.Label(bar, text='每日桌面存档' if daily else '桌面窗口', font=(font_family, 18)).pack(side='left')
+        ttk.Button(bar, text='保存当前桌面' if daily else '拍摄并保留全部窗口', style='Accent.TButton',
+                   command=lambda: engine.submit('workspace_save', daily=daily)).pack(side='right')
         options = ttk.Frame(self.frame); options.pack(fill='x', pady=(0, 10))
         ttk.Checkbutton(options, text='自动保存当天最新', variable=self.enabled,
                         command=lambda: engine.submit('workspace_enabled', enabled=self.enabled.get())).pack(side='left')
@@ -38,9 +39,13 @@ class WorkspacePane:
                         command=lambda: engine.submit('workspace_options', workspace_include_minimized=self.include_minimized.get())).pack(side='left', padx=18)
         ttk.Checkbutton(options, text='保存窗口预览图', variable=self.previews_enabled,
                         command=lambda: engine.submit('workspace_options', workspace_previews=self.previews_enabled.get())).pack(side='left')
+        if daily:
+            options.pack_forget()
         self.hint = ttk.Label(self.frame, style='Muted.TLabel', wraplength=1120,
                              text='包含任务栏窗口，排除只有托盘图标的程序。定时保留最小化窗口上次可读画面；手动拍摄会短暂显示预览板。')
         self.hint.pack(anchor='w', pady=(0, 10))
+        if daily:
+            self.hint.configure(text='每天只显示最晚的一份桌面快照，自动保存会更新当天记录。双击查看画面并选择恢复窗口。')
         filters = ttk.Frame(self.frame); filters.pack(fill='x', pady=(0, 10))
         self.query, self.day = tk.StringVar(), tk.StringVar()
         ttk.Label(filters, text='搜索').pack(side='left')
@@ -71,7 +76,7 @@ class WorkspacePane:
         self.query.set(''); self.day.set(''); self.refresh()
 
     def refresh(self):
-        self.engine.submit('list', view='workspaces', query=self.query.get().strip(), day=self.day.get().strip())
+        self.engine.submit('list', view='workspace_daily' if self.daily else 'workspaces', query=self.query.get().strip(), day=self.day.get().strip())
 
     def update(self, rows):
         selection, position = self.tree.selection(), self.tree.yview()[0]
@@ -81,7 +86,7 @@ class WorkspacePane:
                 self.tree.delete(iid)
         for index, row in enumerate(rows):
             iid = str(row['id']); n, tabs, sessions = workspace_counts(row['payload'])
-            values = (time_text(row['time']), {'auto': '当天自动最新', 'previous': '上次运行保留', 'manual': '手动保留'}[row['origin']],
+            values = (time_text(row['time']), '当天最晚一份' if self.daily else {'auto': '当天自动最新', 'previous': '上次运行保留', 'manual': '手动保留'}[row['origin']],
                       f'{n} 个窗口 · {tabs} 个文件夹标签 · {sessions} 个终端会话', row['note'])
             if self.tree.exists(iid):
                 self.tree.item(iid, values=values)
@@ -90,7 +95,7 @@ class WorkspacePane:
             self.tree.move(iid, '', index)
         self.tree.selection_set([iid for iid in selection if iid in self.rows])
         self.tree.yview_moveto(position)
-        self.count.configure(text=f'{len(rows)} 份存档')
+        self.count.configure(text=f'{len(rows)} 天存档' if self.daily else f'{len(rows)} 份存档')
 
     def selected(self):
         selection = self.tree.selection()
@@ -99,8 +104,8 @@ class WorkspacePane:
     def preview(self):
         row = self.selected()
         if not row:
-            self.message.set('请先选中一份工作现场。'); return
-        win = tk.Toplevel(self.frame); win.title('工作现场 · ' + time_text(row['time']))
+            self.message.set('请先选中一份桌面窗口。'); return
+        win = tk.Toplevel(self.frame); win.title('桌面窗口 · ' + time_text(row['time']))
         win.geometry('1320x850'); win.minsize(980, 650); win.configure(bg=BG)
         apply_icon(win); apply_window_effects(win)
         body = ttk.Frame(win, padding=20); body.pack(fill='both', expand=True)
@@ -184,7 +189,7 @@ class WorkspacePane:
         from tkinter import simpledialog
         row = self.selected()
         if row:
-            text = simpledialog.askstring('工作现场备注', '记录这时在做什么：', initialvalue=row['note'], parent=self.frame)
+            text = simpledialog.askstring('桌面窗口备注', '记录这时在做什么：', initialvalue=row['note'], parent=self.frame)
             if text is not None:
                 self.engine.submit('note', view='workspaces', id=row['id'], text=text)
                 self.refresh()
@@ -192,5 +197,5 @@ class WorkspacePane:
     def delete(self):
         from tkinter import messagebox
         row = self.selected()
-        if row and messagebox.askyesno('删除工作现场', '删除这份存档？原文件和打开的工作窗口会保留。', parent=self.frame):
+        if row and messagebox.askyesno('删除桌面窗口', '删除这份存档？原文件和打开的工作窗口会保留。', parent=self.frame):
             self.engine.submit('delete', view='workspaces', id=row['id']); self.refresh()

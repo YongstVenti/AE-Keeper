@@ -358,17 +358,24 @@ class Archive:
         self.compact.collect()
 
     def stats(self):
-        return {table: {'count': self.db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'bytes': self.bytes(table)} for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces')}
+        result = {table: {'count': self.db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'bytes': self.bytes(table)} for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces')}
+        result['workspaces']['days'] = self.db.execute('SELECT COUNT(DISTINCT day) FROM workspaces').fetchone()[0]
+        return result
 
     def listing(self, view, query='', day='', limit=500, thumbnails_only=False):
-        if view == 'workspaces':
+        if view in ('workspaces', 'workspace_daily'):
             if limit <= 0:
                 return []
-            rows = self.db.execute('SELECT id,day,last_seen,CAST(payload AS BLOB) AS reference,note,origin FROM workspaces ORDER BY last_seen DESC').fetchall()
+            rows = self.db.execute('SELECT id,day,last_seen,CAST(payload AS BLOB) AS reference,note,origin FROM workspaces ORDER BY last_seen DESC,id DESC').fetchall()
             result = []
+            seen_days = set()
             for r in rows:
                 if day and day != r[1]:
                     continue
+                if view == 'workspace_daily':
+                    if r[1] in seen_days:
+                        continue
+                    seen_days.add(r[1])
                 text = self.compact.unpack(r[3], include_full=not thumbnails_only)
                 if query.casefold() in (r[1] + text + r[4]).casefold():
                     result.append(dict(id=r[0], day=r[1], time=r[2], payload=json.loads(text), note=r[4], origin=r[5]))
