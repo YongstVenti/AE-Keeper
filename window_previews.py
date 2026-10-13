@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from image_codec import encode_full, MAX_FULL_BYTES
 
 MAX_IMAGE_BYTES = 180000
 
@@ -28,18 +29,32 @@ def image_readable(picture):
     return not (max(stat.mean) < 5 and max(stat.stddev) < 2)
 
 
-def encode_preview(picture):
+def encode_preview(picture, edge=640):
     from PIL import Image
     picture = picture.convert('RGB')
-    picture.thumbnail((640, 400), Image.Resampling.LANCZOS)
+    picture.thumbnail((edge, int(edge * .625)), Image.Resampling.LANCZOS)
     output = BytesIO(); picture.save(output, format='WEBP', quality=70, method=3)
     raw = output.getvalue()
+    output = BytesIO(); picture.save(output, format='WEBP', lossless=True, quality=80, method=3)
+    raw = min(raw, output.getvalue(), key=len)
     if len(raw) > MAX_IMAGE_BYTES:
         output = BytesIO(); picture.save(output, format='WEBP', quality=40, method=3)
         raw = output.getvalue()
     if len(raw) > MAX_IMAGE_BYTES:
         raise ValueError('窗口预览超过大小限制。')
     return raw
+
+
+def _save_images(picture, folder, index, method, options):
+    (folder / f'{index}.webp').write_bytes(encode_preview(picture, options.get('workspace_thumb_edge', 640)))
+    info = {'time': time.time(), 'method': method}
+    if options.get('workspace_hd'):
+        try:
+            full = encode_full(picture, options.get('workspace_hd_edge', 1920), options.get('workspace_image_mode', 'lossless'))
+            (folder / f'{index}.full').write_bytes(full)
+        except ValueError as error:
+            info['full_reason'] = str(error)
+    (folder / f'{index}.json').write_text(json.dumps(info))
 
 
 def _still_same_window(row):
@@ -80,12 +95,12 @@ def _print_window(row):
         win32gui.ReleaseDC(hwnd, dc_handle)
 
 
-def _dwm_board(rows, folder):
+def _dwm_board(rows, folder, options=None):
     """User-initiated only; never show/minimize/activate a source window."""
     import ctypes
     from ctypes import wintypes
     import tkinter as tk
-    from PIL import ImageGrab
+    from PIL import ImageGrab, Image
     import win32gui
     import win32process
     from desktop_windows import user32
@@ -99,8 +114,10 @@ def _dwm_board(rows, folder):
     dwm.DwmUnregisterThumbnail.argtypes = [wintypes.HANDLE]
     board = tk.Tk(); board.withdraw(); board.overrideredirect(True)
     board.configure(bg='#173a35')
-    width = min(720, api.GetSystemMetrics(0) - 60)
-    height = min(640, api.GetSystemMetrics(1) - 100)
+    options = options or {}
+    hd = options.get('workspace_hd', False)
+    width = min(1500 if hd else 720, api.GetSystemMetrics(0) - 60)
+    height = min(1050 if hd else 640, api.GetSystemMetrics(1) - 100)
     x, y = (api.GetSystemMetrics(0) - width) // 2, (api.GetSystemMetrics(1) - height) // 2
     board.geometry(f'{width}x{height}+{x}+{y}')
     tk.Label(board, text='AE Keeper · 正在保存窗口预览\n原窗口不会展开或切换',
@@ -128,6 +145,40 @@ def _dwm_board(rows, folder):
                 size = wintypes.SIZE()
                 if dwm.DwmQueryThumbnailSourceSize(handle, ctypes.byref(size)) != 0 or min(size.cx, size.cy) <= 0:
                     continue
+                if hd:
+                    # Project source regions at the requested scale onto our
+                    # opaque board. Stitch tiles, never upscale a small preview.
+                    if size.cx > 16384 or size.cy > 16384:
+                        continue
+                    scale = min(1, options.get('workspace_hd_edge', 1920) / max(size.cx, size.cy))
+                    fw, fh = max(1, round(size.cx * scale)), max(1, round(size.cy * scale))
+                    picture = Image.new('RGB', (fw, fh))
+                    valid = True
+                    for ty in range(0, fh, height - 92):
+                        for tx in range(0, fw, width - 24):
+                            tw, th = min(width - 24, fw - tx), min(height - 92, fh - ty)
+                            destination = wintypes.RECT(12, 80, 12 + tw, 80 + th)
+                            source = wintypes.RECT(round(tx * size.cx / fw), round(ty * size.cy / fh),
+                                                  round((tx + tw) * size.cx / fw), round((ty + th) * size.cy / fh))
+                            props = Props(1 | 2 | 4 | 8 | 16, destination, source, 255, True, False)
+                            if dwm.DwmUpdateThumbnailProperties(handle, ctypes.byref(props)) != 0:
+                                valid = False; break
+                            for _ in range(3):
+                                board.update(); time.sleep(.035)
+                            dwm.DwmFlush()
+                            origin = win32gui.ClientToScreen(hwnd, (0, 0))
+                            box = (origin[0] + 12, origin[1] + 80, origin[0] + 12 + tw, origin[1] + 80 + th)
+                            points = [(box[0] + int((tw - 1) * a), box[1] + int((th - 1) * b))
+                                      for a in (0, .5, 1) for b in (0, .5, 1)]
+                            if any(win32process.GetWindowThreadProcessId(win32gui.WindowFromPoint(point))[1] != os.getpid() for point in points):
+                                valid = False; break
+                            picture.paste(ImageGrab.grab(bbox=box), (tx, ty))
+                        if not valid:
+                            break
+                    dwm.DwmUnregisterThumbnail(handle); registered.remove(handle)
+                    if valid and image_readable(picture):
+                        _save_images(picture, folder, index, 'dwm-hd', options)
+                    continue
                 left, top = 12 + (local % 2) * (cell_w + 12), 80 + (local // 2) * cell_h
                 scale = min(cell_w / size.cx, (cell_h - 12) / size.cy)
                 tw, th = max(1, int(size.cx * scale)), max(1, int(size.cy * scale))
@@ -150,8 +201,7 @@ def _dwm_board(rows, folder):
                     continue
                 picture = ImageGrab.grab(bbox=box)
                 if image_readable(picture):
-                    (folder / f'{index}.webp').write_bytes(encode_preview(picture))
-                    (folder / f'{index}.json').write_text(json.dumps({'time': time.time(), 'method': 'dwm'}))
+                    _save_images(picture, folder, index, 'dwm', options)
             for handle in registered:
                 dwm.DwmUnregisterThumbnail(handle)
             registered.clear()
@@ -162,16 +212,17 @@ def _dwm_board(rows, folder):
         board.destroy()
 
 
-def _render_worker(rows, folder, interactive):
+def _render_worker(rows, folder, interactive, options=None):
     import ctypes
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except OSError:
         pass
     folder = Path(folder)
+    options = options or {}
     if interactive:
         try:
-            _dwm_board(list(enumerate(rows)), folder)
+            _dwm_board(list(enumerate(rows)), folder, options)
         except Exception:
             pass  # Still retain metadata and try individual window rendering.
     for index, row in enumerate(rows):
@@ -180,14 +231,16 @@ def _render_worker(rows, folder, interactive):
         try:
             picture = _print_window(row)
             if picture is not None:
-                (folder / f'{index}.webp').write_bytes(encode_preview(picture))
-                (folder / f'{index}.json').write_text(json.dumps({'time': time.time(), 'method': 'window'}))
+                _save_images(picture, folder, index, 'window', options)
         except Exception:
             continue
 
 
-def attach_previews(payload, previous=None, enabled=True, interactive=False, timeout=12):
+def attach_previews(payload, previous=None, enabled=True, interactive=False, timeout=12, options=None):
     rows = payload['windows']
+    options = options or {}
+    if options.get('workspace_hd'):
+        timeout = max(timeout, 90 if interactive else 25)
     if not rows:
         return payload
     if not enabled:
@@ -200,7 +253,7 @@ def attach_previews(payload, previous=None, enabled=True, interactive=False, tim
     with tempfile.TemporaryDirectory(prefix='ae-keeper-previews-') as temp:
         folder = Path(temp).resolve()
         assert folder.parent == Path(tempfile.gettempdir()).resolve()
-        process = mp.get_context('spawn').Process(target=_render_worker, args=(rows, str(folder), interactive), daemon=True)
+        process = mp.get_context('spawn').Process(target=_render_worker, args=(rows, str(folder), interactive, options), daemon=True)
         try:
             process.start(); process.join(timeout)
         except Exception:
@@ -214,8 +267,15 @@ def attach_previews(payload, previous=None, enabled=True, interactive=False, tim
                     info = json.loads((folder / f'{index}.json').read_text())
                     row['preview'] = {'status': 'captured', 'image': base64.b64encode(path.read_bytes()).decode('ascii'),
                                       'time': info['time'], 'method': info['method'], 'reason': ''}
+                    full = folder / f'{index}.full'
+                    if full.is_file() and full.stat().st_size <= MAX_FULL_BYTES:
+                        row['preview']['full_image'] = base64.b64encode(full.read_bytes()).decode('ascii')
+                    elif info.get('full_reason'):
+                        row['preview']['reason'] = info['full_reason']
                 elif window_key(row) in cache:
                     row['preview'] = {**cache[window_key(row)], 'status': 'cached', 'reason': '保留此窗口上次可读取的预览'}
+                    if not options.get('workspace_hd'):
+                        row['preview'].pop('full_image', None)
                 else:
                     row['preview'] = {'status': 'unavailable', 'image': '', 'time': 0, 'method': '',
                                       'reason': '暂无法读取画面，窗口信息已保存；可点击拍摄全部窗口'}

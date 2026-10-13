@@ -143,7 +143,7 @@ class Engine(threading.Thread):
             if manual and settings['workspace_previews']:
                 self.emit('message', text='正在拍摄全部窗口；会短暂显示预览板，不会展开或切换原窗口。')
             payload = attach_previews(payload, previous[0]['payload'] if previous else None,
-                                      enabled=settings['workspace_previews'], interactive=manual)
+                                      enabled=settings['workspace_previews'], interactive=manual, options=settings)
         result = self.archive.capture_workspace(payload, manual=manual)
         self.last_workspace_capture = time.monotonic()
         if manual:
@@ -280,7 +280,7 @@ class Engine(threading.Thread):
                                          progress=lambda text: self.emit('message', text=text))
                 self.emit('workspace_restored', **result)
         elif action == 'list':
-            self.emit('list', view=values['view'], rows=self.archive.listing(values['view'], values.get('query', ''), values.get('day', '')))
+            self.emit('list', view=values['view'], rows=self.archive.listing(values['view'], values.get('query', ''), values.get('day', ''), thumbnails_only=values['view'] == 'workspaces'))
         elif action == 'settings':
             previous = self.archive.settings()
             saved = self.archive.save_settings(values['value'])

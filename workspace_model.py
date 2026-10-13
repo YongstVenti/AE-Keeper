@@ -11,10 +11,15 @@ def clean_workspace(value, imported=False):
         raise ValueError('工作现场格式无效。')
     if len(value['windows']) > 200:
         raise ValueError('工作现场超过 200 个窗口。')
+    total_text = 0
     def text(item, key, limit=4096):
+        nonlocal total_text
         val = item.get(key, '')
         if not isinstance(val, str) or '\x00' in val or len(val) > limit:
             raise ValueError('工作现场包含无效文本。')
+        total_text += len(val.encode('utf-8'))
+        if total_text > 16 * 1024 * 1024:
+            raise ValueError('工作现场文字信息超过 16 MB。')
         return val
     rows = []
     for item in value['windows']:
@@ -54,6 +59,22 @@ def clean_workspace(value, imported=False):
                     raise ValueError('窗口预览图无效。') from error
             row['preview'] = {'image': image, 'time': stamp, 'status': preview['status'],
                               'method': text(preview, 'method', 100), 'reason': text(preview, 'reason', 500)}
+            full = preview.get('full_image', '')
+            if full:
+                from PIL import Image
+                if not isinstance(full, str) or len(full) > 12 * 1024 * 1024:
+                    raise ValueError('高清图大小无效。')
+                try:
+                    raw = base64.b64decode(full, validate=True)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise ValueError('高清图超过 8 MB。')
+                    with Image.open(BytesIO(raw)) as picture:
+                        if picture.format not in ('WEBP', 'PNG', 'AVIF') or max(picture.size) > 3840 or picture.width * picture.height > 12000000:
+                            raise ValueError('高清图超过分辨率限制。')
+                        picture.verify()
+                except Exception as error:
+                    raise ValueError('高清窗口画面无效。') from error
+                row['preview']['full_image'] = full
         for key, fields in [('tabs', ('path', 'title')), ('sessions', ('exe', 'cwd', 'title'))]:
             entries = item.get(key, [])
             if not isinstance(entries, list) or len(entries) > 128:

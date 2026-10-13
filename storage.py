@@ -6,11 +6,14 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 from workspace_model import clean_workspace
+from compact_store import CompactStore
 
 DEFAULTS = {'enabled': True, 'interval': 60, 'mode': 'auto', 'limit_mb': 100, 'retention': 90,
             'chrome_root': '', 'edge_root': '', 'startup': False, 'include_all_profiles': False,
             'workspace_enabled': True, 'workspace_limit_mb': 20,
-            'workspace_include_minimized': True, 'workspace_previews': True}
+            'workspace_include_minimized': True, 'workspace_previews': True,
+            'workspace_hd': False, 'workspace_hd_edge': 1920, 'workspace_image_mode': 'lossless',
+            'workspace_thumb_edge': 640}
 
 
 def safe_url(value):
@@ -60,6 +63,7 @@ class Archive:
         CREATE UNIQUE INDEX IF NOT EXISTS workspace_auto_day ON workspaces(day) WHERE origin='auto';
         CREATE UNIQUE INDEX IF NOT EXISTS workspace_previous_session ON workspaces(day,last_seen) WHERE origin='previous';
         ''')
+        self.compact = CompactStore(self.db, self.folder)
         with self.db:
             for day, stamp, fingerprint, payload, note in self.db.execute('SELECT day,last_seen,fingerprint,payload,note FROM daily_archives WHERE primary_entry IS NULL').fetchall():
                 eid = self._insert_entry(day, stamp, fingerprint, payload, note, 'auto')
@@ -89,7 +93,16 @@ class Archive:
         s['interval'] = max(10, min(3600, int(s['interval'])))
         s['retention'] = max(1, min(3650, int(s['retention'])))
         s['limit_mb'] = max(10, min(1000, int(s['limit_mb'])))
-        s['workspace_limit_mb'] = max(5, min(200, int(s['workspace_limit_mb'])))
+        s['workspace_limit_mb'] = max(5, min(2000, int(s['workspace_limit_mb'])))
+        s['workspace_hd'] = bool(s['workspace_hd'])
+        if int(s['workspace_hd_edge']) not in (1280, 1920, 2560, 3840):
+            raise ValueError('高清长边只能选择 1280、1920、2560 或 3840。')
+        if int(s['workspace_thumb_edge']) not in (320, 480, 640):
+            raise ValueError('缩略图长边只能选择 320、480 或 640。')
+        if s['workspace_image_mode'] not in ('lossless', 'compact'):
+            raise ValueError('图片保存方式无效。')
+        s['workspace_hd_edge'] = int(s['workspace_hd_edge'])
+        s['workspace_thumb_edge'] = int(s['workspace_thumb_edge'])
         if s['mode'] not in ('auto', 'all', 'snapshots'):
             raise ValueError('记录模式无效')
         if self.bytes('bookmarks') > s['limit_mb'] * 1048576 * .15:
@@ -105,6 +118,10 @@ class Archive:
         total = self.db.execute(f'SELECT COALESCE(SUM(bytes),0) FROM {table}').fetchone()[0]
         if table == 'daily_archives':
             total += self.db.execute('SELECT COALESCE(SUM(bytes),0) FROM daily_entries').fetchone()[0]
+        if table == 'workspaces':
+            total += self.compact.size('workspace')
+        if table == 'snapshots':
+            total += self.compact.size('browser')
         return total
 
     def capture_workspace(self, payload, manual=False, timestamp=None):
@@ -114,17 +131,21 @@ class Archive:
         stamp = time.time() if timestamp is None else float(timestamp)
         day = day_key(stamp)
         data = json.dumps(payload, ensure_ascii=False)
-        size = len(data.encode()) + 128
-        if size > self.settings()['workspace_limit_mb'] * 1048576:
-            raise ValueError('工作现场超出容量，请提高工作现场上限。')
+        size = 128
         with self.db:
+            reference = self.compact.pack(data)
+            key = reference[4:].hex()
+            own_size = self.db.execute('SELECT length(data) FROM archive_objects WHERE hash=?', (key,)).fetchone()[0]
+            own_size += self.db.execute('SELECT COALESCE(SUM(length(data)),0) FROM archive_objects WHERE hash IN (SELECT child FROM archive_links WHERE owner=?)', (key,)).fetchone()[0]
+            if own_size + 128 > self.settings()['workspace_limit_mb'] * 1048576:
+                raise ValueError('这一组高清画面超过工作现场容量，请提高容量或降低高清分辨率。')
             if not manual:
                 previous = self.db.execute("SELECT id,last_seen FROM workspaces WHERE day=? AND origin='auto'", (day,)).fetchone()
                 if previous and previous[1] > stamp:
                     return False
                 if previous:
-                    self.db.execute('UPDATE workspaces SET time=?,last_seen=?,payload=?,bytes=bytes-?+? WHERE id=?',
-                                    (stamp, stamp, data, len(self.db.execute('SELECT payload FROM workspaces WHERE id=?', (previous[0],)).fetchone()[0].encode()), len(data.encode()), previous[0]))
+                    self.db.execute('UPDATE workspaces SET time=?,last_seen=?,payload=? WHERE id=?',
+                                    (stamp, stamp, data, previous[0]))
                 else:
                     self.db.execute("INSERT INTO workspaces(day,time,last_seen,payload,bytes,origin) VALUES(?,?,?,?,?,'auto')", (day, stamp, stamp, data, size))
             else:
@@ -150,12 +171,15 @@ class Archive:
 
     def _cleanup_workspaces(self, s):
         self.db.execute('DELETE FROM workspaces WHERE last_seen<?', (time.time() - s['retention'] * 86400,))
+        self.compact.collect()
         used = self.bytes('workspaces')
         limit = s['workspace_limit_mb'] * 1048576
         for rid, size in self.db.execute('SELECT id,bytes FROM workspaces ORDER BY last_seen').fetchall():
             if used <= limit:
                 break
-            self.db.execute('DELETE FROM workspaces WHERE id=?', (rid,)); used -= size
+            self.db.execute('DELETE FROM workspaces WHERE id=?', (rid,))
+            self.compact.collect()
+            used = self.bytes('workspaces')
 
     def record(self, rows, changed_targets):
         s = self.settings()
@@ -318,26 +342,39 @@ class Archive:
                 if used <= limit:
                     break
                 self.db.execute(f'DELETE FROM {table} WHERE rowid=?', (rid,))
-                used -= size
+                self.compact.collect()
+                used = self.bytes(table) + (self.bytes('daily_archives') if table == 'snapshots' else 0)
         daily_limit = s['limit_mb'] * 1048576 * .5
-        used = self.bytes('daily_archives')
+        used = self.bytes('daily_archives') + self.bytes('snapshots')
         for day, size in self.db.execute('SELECT day,bytes FROM daily_archives ORDER BY day').fetchall():
             if used <= daily_limit:
                 break
             size += self.db.execute('SELECT COALESCE(SUM(bytes),0) FROM daily_entries WHERE day=?', (day,)).fetchone()[0]
             self._delete_day(day)
-            used -= size
+            self.compact.collect()
+            used = self.bytes('daily_archives') + self.bytes('snapshots')
         if self.bytes('visits') < s['limit_mb'] * 1048576 * .35 * .9:
             self.set_meta('fallback', False)
+        self.compact.collect()
 
     def stats(self):
         return {table: {'count': self.db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'bytes': self.bytes(table)} for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces')}
 
-    def listing(self, view, query='', day='', limit=500):
+    def listing(self, view, query='', day='', limit=500, thumbnails_only=False):
         if view == 'workspaces':
-            rows = self.db.execute('SELECT id,day,last_seen,payload,note,origin FROM workspaces ORDER BY last_seen DESC').fetchall()
-            return [dict(id=r[0], day=r[1], time=r[2], payload=json.loads(r[3]), note=r[4], origin=r[5])
-                    for r in rows if (not day or day == r[1]) and query.casefold() in (r[1] + r[3] + r[4]).casefold()][:limit]
+            if limit <= 0:
+                return []
+            rows = self.db.execute('SELECT id,day,last_seen,CAST(payload AS BLOB) AS reference,note,origin FROM workspaces ORDER BY last_seen DESC').fetchall()
+            result = []
+            for r in rows:
+                if day and day != r[1]:
+                    continue
+                text = self.compact.unpack(r[3], include_full=not thumbnails_only)
+                if query.casefold() in (r[1] + text + r[4]).casefold():
+                    result.append(dict(id=r[0], day=r[1], time=r[2], payload=json.loads(text), note=r[4], origin=r[5]))
+                    if len(result) >= limit:
+                        break
+            return result
         if view == 'daily':
             result = []
             for rid, folder_day, eid, locked in self.db.execute('SELECT rowid,day,primary_entry,primary_locked FROM daily_archives ORDER BY day DESC').fetchall():
@@ -477,6 +514,7 @@ class Archive:
                     self.db.execute('INSERT INTO workspaces(day,time,last_seen,payload,bytes,note,origin) VALUES(?,?,?,?,?,?,?)',
                                     (day, stamp, stamp, data, len(data.encode()) + len(note.encode()) + 128, note, origin))
                 self.set_meta('last_workspace_saved', max(stamp, self.meta('last_workspace_saved', 0)))
+            self.compact.collect()
             if self.bytes('workspaces') > self.settings()['workspace_limit_mb'] * 1048576:
                 raise ValueError('工作现场备份超过容量，本次导入已回滚。')
             for r in value['bookmarks']:

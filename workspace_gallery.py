@@ -3,7 +3,7 @@ import base64
 from io import BytesIO
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
 from PIL import Image, ImageTk
 
@@ -19,10 +19,11 @@ def preview_time(stamp):
 
 
 class WorkspaceGallery:
-    def __init__(self, parent, windows, selected, available, family, changed):
+    def __init__(self, parent, windows, selected, available, family, changed, image_loader=None):
         self.frame = ttk.Frame(parent)
         self.windows, self.selected, self.available = windows, selected, available
         self.changed, self.family = changed, family
+        self.image_loader = image_loader
         self.photos, self.cards, self.vars = [], [], {}
         self.canvas = tk.Canvas(self.frame, bg=BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.frame, orient='vertical', command=self.canvas.yview)
@@ -72,7 +73,9 @@ class WorkspaceGallery:
             if preview.get('method') == 'demo':
                 status = '合成演示图'
             tk.Label(card, text=status, bg=WHITE, fg=MUTED, font=(family, 9), anchor='w').pack(fill='x')
-            button = ttk.Button(card, text='查看画面', style='Panel.Quiet.TButton', command=lambda i=index: self.zoom(i))
+            if preview.get('reason') and photo and not (preview.get('full_image') or preview.get('full_image_ref')):
+                tk.Label(card, text=preview['reason'], bg=WHITE, fg=MUTED, font=(family, 9), wraplength=260, justify='left').pack(fill='x')
+            button = ttk.Button(card, text='查看高清画面' if preview.get('full_image') or preview.get('full_image_ref') else '查看缩略图', style='Panel.Quiet.TButton', command=lambda i=index: self.zoom(i))
             button.pack(anchor='e', pady=(3, 0))
             if not photo:
                 button.configure(state='disabled')
@@ -118,10 +121,34 @@ class WorkspaceGallery:
         row = self.windows[index]; preview = row.get('preview', {})
         if not preview.get('image'):
             return
+        try:
+            raw = (self.image_loader(preview['full_image_ref']) if preview.get('full_image_ref') and self.image_loader
+                   else base64.b64decode(preview.get('full_image') or preview['image']))
+            picture = Image.open(BytesIO(raw)).convert('RGB')
+        except Exception as error:
+            messagebox.showerror('画面暂不可读取', str(error), parent=self.frame)
+            return
         win = tk.Toplevel(self.frame); win.title('窗口画面 · ' + row['title'])
         win.configure(bg=BG); apply_icon(win); apply_window_effects(win)
-        picture = Image.open(BytesIO(base64.b64decode(preview['image']))).convert('RGB')
-        win.preview_photo = ImageTk.PhotoImage(picture, master=win)
-        ttk.Label(win, image=win.preview_photo).pack(padx=20, pady=20)
-        text = '保存的预览画面 · ' + preview_time(preview.get('time', 0)) + ' · 画面不等于软件运行状态备份'
-        ttk.Label(win, text=text, style='Muted.TLabel', wraplength=600).pack(padx=20, pady=(0, 20))
+        win.geometry(f'{min(1100, win.winfo_screenwidth()-80)}x{min(800, win.winfo_screenheight()-100)}')
+        bar = ttk.Frame(win, padding=12); bar.pack(fill='x')
+        text = ('高清画面' if preview.get('full_image') or preview.get('full_image_ref') else '仅缩略图') + f' · {picture.width} × {picture.height} · ' + preview_time(preview.get('time', 0))
+        ttk.Label(bar, text=text).pack(side='left')
+        panel = ttk.Frame(win); panel.pack(fill='both', expand=True, padx=12, pady=(0, 12))
+        canvas = tk.Canvas(panel, bg='#eaf1ee', highlightthickness=0)
+        ys = ttk.Scrollbar(panel, orient='vertical', command=canvas.yview)
+        xs = ttk.Scrollbar(panel, orient='horizontal', command=canvas.xview)
+        canvas.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        canvas.grid(row=0, column=0, sticky='nsew'); ys.grid(row=0, column=1, sticky='ns'); xs.grid(row=1, column=0, sticky='ew')
+        panel.rowconfigure(0, weight=1); panel.columnconfigure(0, weight=1)
+        def render(original=False):
+            display = picture.copy()
+            if not original:
+                display.thumbnail((max(100, canvas.winfo_width()-12), max(100, canvas.winfo_height()-12)), Image.Resampling.LANCZOS)
+            win.preview_photo = ImageTk.PhotoImage(display, master=win)
+            canvas.delete('all'); canvas.create_image(0, 0, image=win.preview_photo, anchor='nw')
+            canvas.configure(scrollregion=(0, 0, display.width, display.height))
+        ttk.Button(bar, text='原始比例 100%', command=lambda: render(True)).pack(side='right')
+        ttk.Button(bar, text='适应窗口', command=render).pack(side='right', padx=8)
+        canvas.bind('<MouseWheel>', lambda event: canvas.yview_scroll(-int(event.delta / 120), 'units'))
+        win.after(100, render)

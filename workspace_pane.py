@@ -8,6 +8,7 @@ from desktop_windows import restorable
 from window_effects import apply_window_effects
 from workspace_model import workspace_counts
 from workspace_gallery import WorkspaceGallery
+from compact_store import read_image
 
 LABELS = {'explorer': '资源管理器', 'terminal': 'Windows 终端', 'console': '控制台',
           'app': '软件', 'browser': '浏览器'}
@@ -155,7 +156,9 @@ class WorkspacePane:
         def changed(index):
             window = windows[index]
             tree.item(str(index), text=('☑' if index in selected else '☐') + '  ' + (window['title'] or window['app']))
-        gallery = WorkspaceGallery(views, windows, selected, available, self.font_family, changed)
+        folder = self.engine.archive.folder
+        gallery = WorkspaceGallery(views, windows, selected, available, self.font_family, changed,
+                                   image_loader=lambda key: read_image(folder, key))
         def mode(cards):
             table.pack_forget(); gallery.frame.pack_forget()
             (gallery.frame if cards else table).pack(fill='both', expand=True)

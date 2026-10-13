@@ -572,7 +572,11 @@ class App:
         self.enabled_var = tk.BooleanVar(value=s.get('enabled', True))
         self.startup_var = tk.BooleanVar(value=s.get('startup', False))
         self.all_profiles_var = tk.BooleanVar(value=s.get('include_all_profiles', False))
-        modes = {'auto': '自动：记录量满后只保留快照', 'all': '全部网页：容量满后清理最早记录', 'snapshots': '仅保存打开的标签页快照'}
+        self.hd_var = tk.BooleanVar(value=s.get('workspace_hd', False))
+        self.hd_edge_var = tk.StringVar(value=str(s.get('workspace_hd_edge', 1920)))
+        self.thumb_edge_var = tk.StringVar(value=str(s.get('workspace_thumb_edge', 640)))
+        self.image_mode_var = tk.StringVar(value='无损清晰（适合文字）' if s.get('workspace_image_mode', 'lossless') == 'lossless' else '节省空间（轻微有损）')
+        modes = {'auto': '自动：记录量满后只保留快照', 'all': '全部网页：满后清理最早记录', 'snapshots': '仅保存打开的标签页快照'}
         self.mode_var = tk.StringVar(value=modes.get(s.get('mode', 'auto')))
         frame = ttk.Frame(self.settings_frame)
         frame.pack(fill='x')
@@ -580,14 +584,23 @@ class App:
         labels = [('interval', '保存间隔（秒，10—3600）'), ('retention', '保留天数（1—3650）'), ('limit_mb', '档案容量上限（MB，10—1000）'), ('chrome_root', 'Chrome数据目录'), ('edge_root', 'Edge数据目录')]
         for index, (key, label) in enumerate(labels, 1):
             ttk.Label(frame, text=label).grid(row=index, column=0, sticky='w', pady=8)
-            ttk.Entry(frame, textvariable=self.form_vars[key], width=75 if key.endswith('root') else 25).grid(row=index, column=1, sticky='w', padx=18)
+            ttk.Entry(frame, textvariable=self.form_vars[key], width=36 if key.endswith('root') else 25).grid(row=index, column=1, sticky='w', padx=18)
         ttk.Label(frame, text='记录方式').grid(row=6, column=0, sticky='w', pady=8)
-        ttk.Combobox(frame, textvariable=self.mode_var, values=list(modes.values()), state='readonly', width=48).grid(row=6, column=1, sticky='w', padx=18)
+        ttk.Combobox(frame, textvariable=self.mode_var, values=list(modes.values()), state='readonly', width=32).grid(row=6, column=1, sticky='w', padx=18)
         ttk.Checkbutton(frame, text='开机启动软件并隐藏到托盘', variable=self.startup_var).grid(row=7, column=0, columnspan=2, sticky='w', pady=8)
-        ttk.Checkbutton(frame, text='全范围读取：包含其他个人资料与无痕窗口（修改后需重新连接）', variable=self.all_profiles_var).grid(row=8, column=0, columnspan=2, sticky='w', pady=8)
-        ttk.Label(frame, text='工作现场独立容量（MB，5—200）').grid(row=9, column=0, sticky='w', pady=8)
+        ttk.Checkbutton(frame, text='读取其他个人资料与无痕窗口（需重新连接）', variable=self.all_profiles_var).grid(row=8, column=0, columnspan=2, sticky='w', pady=8)
+        ttk.Label(frame, text='工作现场独立容量（MB，5—2000）').grid(row=9, column=0, sticky='w', pady=8)
         ttk.Entry(frame, textvariable=self.form_vars['workspace_limit_mb'], width=25).grid(row=9, column=1, sticky='w', padx=18)
-        ttk.Label(self.settings_frame, text='浏览器容量分配：记录35%，快照和每日存档50%，收藏15%。工作现场使用独立容量，与浏览器共用保存间隔和保留天数。调小上限会清理最早记录。\n默认不记录无痕窗口。工作现场只保存未最小化窗口，不保存文档内容或终端命令。', style='Muted.TLabel', wraplength=1060).pack(anchor='w', pady=12)
+        images = ttk.Frame(frame, padding=(25, 0, 0, 0))
+        images.grid(row=0, column=2, rowspan=10, sticky='nw')
+        ttk.Checkbutton(images, text='同时保存高清画面（保留缩略图）', variable=self.hd_var).grid(row=0, column=0, columnspan=2, sticky='w', pady=8)
+        for row, label, var, options in [(1, '高清长边上限', self.hd_edge_var, ('1280', '1920', '2560', '3840')),
+                                        (2, '高清压缩方式', self.image_mode_var, ('无损清晰（适合文字）', '节省空间（轻微有损）')),
+                                        (3, '缩略图长边', self.thumb_edge_var, ('320', '480', '640'))]:
+            ttk.Label(images, text=label).grid(row=row, column=0, sticky='w', pady=10)
+            ttk.Combobox(images, textvariable=var, values=options, state='readonly', width=24).grid(row=row, column=1, sticky='w', padx=10)
+        ttk.Label(images, text='双击窗口卡片查看高清图，可切换原始比例。\n不放大小图；历史缩略图不会自动变高清。\n自动保存不展开窗口；最小化画面不可读时\n保留上次画面，显示原截图时间。\n手动拍摄可保存最小化窗口的高清画面。', style='Muted.TLabel', wraplength=370).grid(row=4, column=0, columnspan=2, sticky='w', pady=16)
+        ttk.Label(self.settings_frame, text='图片按内容去重，快照无损压缩。高清默认关闭；开启后仍受工作现场容量限制。调小容量会清理最早存档。\n保存任务视图中的窗口（可含最小化窗口），画面用于回顾；未保存文档及运行中的终端任务不能靠截图恢复。', style='Muted.TLabel', wraplength=1060).pack(anchor='w', pady=12)
         bar = ttk.Frame(self.settings_frame)
         bar.pack(fill='x')
         ttk.Button(bar, text='保存设置', style='Accent.TButton', command=lambda: self.save_settings(modes)).pack(side='left')
@@ -599,6 +612,9 @@ class App:
         try:
             values = {k: int(v.get()) if k in ('interval', 'retention', 'limit_mb', 'workspace_limit_mb') else v.get().strip() for k, v in self.form_vars.items()}
             values.update(enabled=self.enabled_var.get(), startup=self.startup_var.get(), include_all_profiles=self.all_profiles_var.get(), mode=next(k for k, v in modes.items() if v == self.mode_var.get()))
+            values.update(workspace_hd=self.hd_var.get(), workspace_hd_edge=int(self.hd_edge_var.get()),
+                          workspace_thumb_edge=int(self.thumb_edge_var.get()),
+                          workspace_image_mode='lossless' if self.image_mode_var.get().startswith('无损') else 'compact')
             if (values['retention'] < self.settings.get('retention', 90) or values['limit_mb'] < self.settings.get('limit_mb', 100)
                     or values['workspace_limit_mb'] < self.settings.get('workspace_limit_mb', 20)):
                 if not messagebox.askyesno('清理超限记录', '调小上限会立即清理超限的旧记录。确认已备份并继续？', parent=self.root):
