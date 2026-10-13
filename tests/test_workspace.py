@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from desktop_windows import window_included, terminal_commands, restore_desktop
+from desktop_windows import window_included, terminal_commands, restore_desktop, capture_desktop, restorable
 from engine import Engine
 from storage import Archive
 from workspace_model import clean_workspace, demo_workspace
@@ -138,6 +138,15 @@ class DesktopRestoreTests(unittest.TestCase):
             self.assertNotIn('Remove-Item anything', commands[0][0])
             row['sessions'][0]['cwd'] = r'C:\a;new-tab'
             self.assertEqual(terminal_commands(row, 'wt.exe'), [])
+
+    def test_store_app_window_is_recorded_without_launching_system_host(self):
+        row = clean_workspace(demo_workspace())['windows'][2]
+        row.update(app='ApplicationFrameHost.exe', minimized=False, **{'class': 'ApplicationFrameWindow'})
+        with patch('desktop_windows.native_windows', return_value=[row]), patch('win32com.client.Dispatch'):
+            captured = capture_desktop()['windows']
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]['exe'], '')
+        self.assertFalse(restorable(captured[0]))
 
     def test_restore_is_selected_only_and_keeps_live_original(self):
         payload = clean_workspace(demo_workspace())

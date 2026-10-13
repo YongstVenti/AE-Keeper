@@ -17,10 +17,9 @@ import psutil
 SHELLS = {'cmd.exe', 'powershell.exe', 'pwsh.exe'}
 TERMINALS = {'windowsterminal.exe', 'windowsterminalpreview.exe'}
 BROWSERS = {'chrome.exe', 'msedge.exe'}
-IGNORED_CLASSES = {'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd',
-                   'Windows.UI.Core.CoreWindow', 'tooltips_class32'}
+IGNORED_CLASSES = {'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd', 'tooltips_class32'}
 IGNORED_APPS = {'shellexperiencehost.exe', 'startmenuexperiencehost.exe',
-                'searchhost.exe', 'textinputhost.exe', 'applicationframehost.exe'}
+                'searchhost.exe', 'textinputhost.exe'}
 
 
 def user32():
@@ -185,6 +184,8 @@ def capture_desktop():
                     row['detail'] = '控制台所属 shell 未确定，暂不能恢复'
             elif name in BROWSERS:
                 row.update(kind='browser', detail='浏览器标签页请从“每日存档”恢复')
+            elif name == 'applicationframehost.exe':
+                row.update(exe='', detail='已记录窗口；此系统宿主不是软件入口，请在原应用中恢复')
             result.append(row)
         return {'version': 1, 'windows': result, 'warnings': warnings}
     finally:
