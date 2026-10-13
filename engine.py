@@ -8,6 +8,8 @@ from pathlib import Path
 from cdp import BrowserConnection
 from browser_setup import open_settings, SETTINGS_URLS
 from storage import Archive, safe_url
+from desktop_windows import capture_desktop, restore_desktop
+from workspace_model import demo_workspace, workspace_counts
 
 
 def default_roots():
@@ -63,11 +65,13 @@ class Engine(threading.Thread):
         if not config['edge_root']:
             config['edge_root'] = roots['Edge']
         self.archive.save_settings(config)
+        self.archive.preserve_workspace_on_start()
         self.commands, self.output = queue.Queue(), output
         self.clients, self.current, self.last_urls = {}, [], {}
         self.status = {'Chrome': '未连接', 'Edge': '未连接'}
         self.stop_event = threading.Event()
         self.last_scan, self.last_capture = 0, 0
+        self.last_workspace_capture = 0
         self.demo = demo
         self.pending_connections = set()
         self.connection_attempts = set()
@@ -127,7 +131,20 @@ class Engine(threading.Thread):
         settings = self.archive.settings()
         self.emit('state', settings=settings, status=dict(self.status), current=self.current,
                   stats=self.archive.stats(), last_saved=self.archive.meta('last_saved'),
+                  last_workspace_saved=self.archive.meta('last_workspace_saved'),
                   fallback=self.archive.meta('fallback', False))
+
+    def save_workspace(self, manual=False):
+        payload = demo_workspace() if self.demo else capture_desktop()
+        result = self.archive.capture_workspace(payload, manual=manual)
+        self.last_workspace_capture = time.monotonic()
+        if manual:
+            windows, tabs, sessions = workspace_counts(payload)
+            self.emit('message', text=f'工作现场已保留：{windows} 个窗口、{tabs} 个文件夹标签、{sessions} 个终端会话。' if result
+                      else '当前没有可保存的非最小化窗口；之前的工作现场已保留。')
+        if result:
+            self.emit('workspace_saved', manual=manual)
+        return result
 
     def open_connection_setup(self, browser, force=False):
         if browser in self.setup_opened and not force:
@@ -231,7 +248,24 @@ class Engine(threading.Thread):
             self.status[browser] = '已断开'
             self.scan()
         elif action == 'save':
-            self.emit('message', text='标签页快照已保存。' if self.save() else '没有已连接的标签页；请先连接浏览器。')
+            browser_saved = self.save()
+            desktop_saved = self.save_workspace(manual=True)
+            self.emit('message', text=('浏览器快照及工作现场已保存。' if browser_saved and desktop_saved else
+                                      '工作现场已保存；浏览器尚未连接。' if desktop_saved else
+                                      '浏览器快照已保存；没有可保存的工作窗口。' if browser_saved else '当前没有可保存的窗口。'))
+        elif action == 'workspace_save':
+            self.save_workspace(manual=True)
+        elif action == 'workspace_enabled':
+            self.archive.save_settings({'workspace_enabled': bool(values['enabled'])})
+            self.emit('message', text='工作现场自动保存已开启。' if values['enabled'] else '工作现场自动保存已暂停。')
+        elif action == 'workspace_restore':
+            if self.demo:
+                self.emit('message', text='演示模式不会打开真实工作窗口。')
+            else:
+                snapshot = self.archive.workspace(values['id'])
+                result = restore_desktop(snapshot['payload'], values['selected'],
+                                         progress=lambda text: self.emit('message', text=text))
+                self.emit('workspace_restored', **result)
         elif action == 'list':
             self.emit('list', view=values['view'], rows=self.archive.listing(values['view'], values.get('query', ''), values.get('day', '')))
         elif action == 'settings':
@@ -311,6 +345,7 @@ class Engine(threading.Thread):
                                 ('Edge', '3', '家具与物件的故事', 'https://example.com/objects')])]
             self.status = {'Chrome': '演示 · 3个标签页', 'Edge': '演示 · 2个标签页'}
             self.archive.capture(self.current, ['Chrome', 'Edge'])
+            self.save_workspace()
         self.state()
         while not self.stop_event.is_set():
             try:
@@ -331,6 +366,11 @@ class Engine(threading.Thread):
                         self.state()
                     if s['enabled'] and self.current and now - self.last_capture >= s['interval']:
                         self.save()
+                        self.state()
+                    if s['workspace_enabled'] and now - self.last_workspace_capture >= s['interval']:
+                        # No browser connection or permission required for desktop metadata.
+                        self.last_workspace_capture = now
+                        self.save_workspace()
                         self.state()
             except Exception as e:
                 self.emit('error', text=str(e))

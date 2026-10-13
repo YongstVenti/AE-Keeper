@@ -5,9 +5,11 @@ import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+from workspace_model import clean_workspace
 
 DEFAULTS = {'enabled': True, 'interval': 60, 'mode': 'auto', 'limit_mb': 100, 'retention': 90,
-            'chrome_root': '', 'edge_root': '', 'startup': False, 'include_all_profiles': False}
+            'chrome_root': '', 'edge_root': '', 'startup': False, 'include_all_profiles': False,
+            'workspace_enabled': True, 'workspace_limit_mb': 20}
 
 
 def safe_url(value):
@@ -53,6 +55,9 @@ class Archive:
         CREATE TABLE IF NOT EXISTS daily_entries(id INTEGER PRIMARY KEY,day TEXT,time REAL,last_seen REAL,fingerprint TEXT,payload TEXT,bytes INTEGER,note TEXT DEFAULT '',origin TEXT DEFAULT 'manual');
         CREATE INDEX IF NOT EXISTS daily_entry_day ON daily_entries(day);
         CREATE UNIQUE INDEX IF NOT EXISTS daily_auto_day ON daily_entries(day) WHERE origin='auto';
+        CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY,day TEXT,time REAL,last_seen REAL,payload TEXT,bytes INTEGER,note TEXT DEFAULT '',origin TEXT DEFAULT 'manual');
+        CREATE UNIQUE INDEX IF NOT EXISTS workspace_auto_day ON workspaces(day) WHERE origin='auto';
+        CREATE UNIQUE INDEX IF NOT EXISTS workspace_previous_session ON workspaces(day,last_seen) WHERE origin='previous';
         ''')
         with self.db:
             for day, stamp, fingerprint, payload, note in self.db.execute('SELECT day,last_seen,fingerprint,payload,note FROM daily_archives WHERE primary_entry IS NULL').fetchall():
@@ -83,6 +88,7 @@ class Archive:
         s['interval'] = max(10, min(3600, int(s['interval'])))
         s['retention'] = max(1, min(3650, int(s['retention'])))
         s['limit_mb'] = max(10, min(1000, int(s['limit_mb'])))
+        s['workspace_limit_mb'] = max(5, min(200, int(s['workspace_limit_mb'])))
         if s['mode'] not in ('auto', 'all', 'snapshots'):
             raise ValueError('记录模式无效')
         if self.bytes('bookmarks') > s['limit_mb'] * 1048576 * .15:
@@ -93,12 +99,62 @@ class Archive:
         return s
 
     def bytes(self, table):
-        if table not in ('visits', 'snapshots', 'bookmarks', 'daily_archives'):
+        if table not in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces'):
             raise ValueError('未知档案类型')
         total = self.db.execute(f'SELECT COALESCE(SUM(bytes),0) FROM {table}').fetchone()[0]
         if table == 'daily_archives':
             total += self.db.execute('SELECT COALESCE(SUM(bytes),0) FROM daily_entries').fetchone()[0]
         return total
+
+    def capture_workspace(self, payload, manual=False, timestamp=None):
+        payload = clean_workspace(payload)
+        if not payload['windows']:
+            return False  # An empty desktop must not erase a useful daily archive.
+        stamp = time.time() if timestamp is None else float(timestamp)
+        day = day_key(stamp)
+        data = json.dumps(payload, ensure_ascii=False)
+        size = len(data.encode()) + 128
+        if size > self.settings()['workspace_limit_mb'] * 1048576:
+            raise ValueError('工作现场超出容量，请提高工作现场上限。')
+        with self.db:
+            if not manual:
+                previous = self.db.execute("SELECT id,last_seen FROM workspaces WHERE day=? AND origin='auto'", (day,)).fetchone()
+                if previous and previous[1] > stamp:
+                    return False
+                if previous:
+                    self.db.execute('UPDATE workspaces SET time=?,last_seen=?,payload=?,bytes=bytes-?+? WHERE id=?',
+                                    (stamp, stamp, data, len(self.db.execute('SELECT payload FROM workspaces WHERE id=?', (previous[0],)).fetchone()[0].encode()), len(data.encode()), previous[0]))
+                else:
+                    self.db.execute("INSERT INTO workspaces(day,time,last_seen,payload,bytes,origin) VALUES(?,?,?,?,?,'auto')", (day, stamp, stamp, data, size))
+            else:
+                self.db.execute("INSERT INTO workspaces(day,time,last_seen,payload,bytes,origin) VALUES(?,?,?,?,?,'manual')", (day, stamp, stamp, data, size))
+            self.set_meta('last_workspace_saved', max(stamp, self.meta('last_workspace_saved', 0)))
+            self._cleanup_workspaces(self.settings())
+        return True
+
+    def workspace(self, rid):
+        row = self.db.execute('SELECT id,day,last_seen,payload,note,origin FROM workspaces WHERE id=?', (rid,)).fetchone()
+        if row is None:
+            raise ValueError('这个工作现场已不存在。')
+        return dict(id=row[0], day=row[1], time=row[2], payload=json.loads(row[3]), note=row[4], origin=row[5])
+
+    def preserve_workspace_on_start(self):
+        # Before the new session overwrites today's auto row, retain the last
+        # session. A same-day restart must not erase the work being recovered.
+        with self.db:
+            self.db.execute("""INSERT OR IGNORE INTO workspaces(day,time,last_seen,payload,bytes,note,origin)
+                SELECT day,time,last_seen,payload,bytes,note,'previous' FROM workspaces
+                WHERE day=? AND origin='auto'""", (day_key(),))
+            self._cleanup_workspaces(self.settings())
+
+    def _cleanup_workspaces(self, s):
+        self.db.execute('DELETE FROM workspaces WHERE last_seen<?', (time.time() - s['retention'] * 86400,))
+        used = self.bytes('workspaces')
+        limit = s['workspace_limit_mb'] * 1048576
+        for rid, size in self.db.execute('SELECT id,bytes FROM workspaces ORDER BY last_seen').fetchall():
+            if used <= limit:
+                break
+            self.db.execute('DELETE FROM workspaces WHERE id=?', (rid,)); used -= size
 
     def record(self, rows, changed_targets):
         s = self.settings()
@@ -246,6 +302,7 @@ class Archive:
 
     def cleanup(self, s=None):
         s = s or self.settings()
+        self._cleanup_workspaces(s)
         cutoff = time.time() - s['retention'] * 86400
         self.db.execute('DELETE FROM visits WHERE last_seen<?', (cutoff,))
         self.db.execute('DELETE FROM snapshots WHERE last_seen<?', (cutoff,))
@@ -273,9 +330,13 @@ class Archive:
             self.set_meta('fallback', False)
 
     def stats(self):
-        return {table: {'count': self.db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'bytes': self.bytes(table)} for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives')}
+        return {table: {'count': self.db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0], 'bytes': self.bytes(table)} for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces')}
 
     def listing(self, view, query='', day='', limit=500):
+        if view == 'workspaces':
+            rows = self.db.execute('SELECT id,day,last_seen,payload,note,origin FROM workspaces ORDER BY last_seen DESC').fetchall()
+            return [dict(id=r[0], day=r[1], time=r[2], payload=json.loads(r[3]), note=r[4], origin=r[5])
+                    for r in rows if (not day or day == r[1]) and query.casefold() in (r[1] + r[3] + r[4]).casefold()][:limit]
         if view == 'daily':
             result = []
             for rid, folder_day, eid, locked in self.db.execute('SELECT rowid,day,primary_entry,primary_locked FROM daily_archives ORDER BY day DESC').fetchall():
@@ -324,7 +385,7 @@ class Archive:
         if view == 'daily_entry':
             view = 'daily_entries'
         view = 'daily_archives' if view == 'daily' else view
-        if view not in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'daily_entries'):
+        if view not in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'daily_entries', 'workspaces'):
             return
         with self.db:
             old = self.db.execute(f'SELECT note,bytes FROM {view} WHERE rowid=?', (rid,)).fetchone()
@@ -355,7 +416,7 @@ class Archive:
                                 self._delete_day(row[0])
             return
         view = 'daily_archives' if view == 'daily' else view
-        if view not in ('visits', 'snapshots', 'bookmarks', 'daily_archives'):
+        if view not in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces'):
             return
         with self.db:
             self.db.execute(f'DELETE FROM {view} WHERE rowid=?', (rid,))
@@ -364,7 +425,7 @@ class Archive:
     def export(self, path):
         with self.db:
             result = {'format': 'browse-trace-desktop', 'version': 1, 'exported_at': time.time(), 'settings': self.settings()}
-            for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives'):
+            for table in ('visits', 'snapshots', 'bookmarks', 'daily_archives', 'workspaces'):
                 cur = self.db.execute(f'SELECT * FROM {table}')
                 columns = [c[0] for c in cur.description]
                 result[table] = [dict(zip(columns, r)) for r in cur.fetchall()]
@@ -386,8 +447,37 @@ class Archive:
         if not isinstance(folders, list):
             raise ValueError('每日文件夹备份格式不完整。')
         folder_days = {folder['day'] for folder in folders}
+        workspaces = value.get('workspaces', [])
+        if not isinstance(workspaces, list):
+            raise ValueError('工作现场备份格式无效。')
         # A single transaction makes a rejected import leave the existing archive untouched.
         with self.db:
+            for entry in workspaces:
+                day = str(entry['day']); self._valid_day(day)
+                stamp = float(entry['last_seen'])
+                if day != day_key(stamp):
+                    raise ValueError('工作现场日期不一致。')
+                payload = clean_workspace(json.loads(entry['payload']), imported=True)
+                data = json.dumps(payload, ensure_ascii=False)
+                note = str(entry.get('note', ''))[:2000]
+                origin = entry.get('origin', 'manual')
+                if origin not in ('manual', 'auto', 'previous'):
+                    raise ValueError('工作现场保存方式无效。')
+                old = self.db.execute("SELECT id,last_seen FROM workspaces WHERE day=? AND origin='auto'", (day,)).fetchone() if origin == 'auto' else None
+                if old and old[1] >= stamp:
+                    continue
+                if old:
+                    self.db.execute('DELETE FROM workspaces WHERE id=?', (old[0],))
+                matches = self.db.execute('SELECT payload FROM workspaces WHERE day=? AND last_seen=? AND origin=?', (day, stamp, origin)).fetchall()
+                duplicate = any(clean_workspace(json.loads(match[0]), imported=True) == payload for match in matches)
+                # Live HWND metadata is intentionally cleared on import. It must
+                # not turn a re-import of one's own backup into extra archives.
+                if not duplicate and not (origin == 'previous' and matches):
+                    self.db.execute('INSERT INTO workspaces(day,time,last_seen,payload,bytes,note,origin) VALUES(?,?,?,?,?,?,?)',
+                                    (day, stamp, stamp, data, len(data.encode()) + len(note.encode()) + 128, note, origin))
+                self.set_meta('last_workspace_saved', max(stamp, self.meta('last_workspace_saved', 0)))
+            if self.bytes('workspaces') > self.settings()['workspace_limit_mb'] * 1048576:
+                raise ValueError('工作现场备份超过容量，本次导入已回滚。')
             for r in value['bookmarks']:
                 if not safe_url(r.get('url')):
                     continue
