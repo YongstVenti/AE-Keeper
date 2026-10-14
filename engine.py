@@ -306,6 +306,10 @@ class Engine(threading.Thread):
             self.archive.add_daily(values['id'], values['day'], values['mode'])
             self.emit('daily_changed', day=values['day'])
             self.emit('message', text='已加入每日存档。主存档已固定，原有快照仍保留。')
+        elif action == 'daily_move':
+            self.archive.move_daily(values['view'], values['id'], values['day'])
+            self.emit('archive_moved', view=values['view'], day=values['day'])
+            self.emit('message', text=f"已归档到 {values['day']}，实际保存时间和快照内容已保留。")
         elif action == 'daily_primary':
             self.archive.primary_daily(values['entry_id'])
             self.emit('daily_changed', day=self.archive.daily_entry(values['entry_id'])['day'], primary=True)

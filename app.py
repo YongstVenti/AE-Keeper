@@ -189,6 +189,7 @@ class App:
         self.action_buttons = {}
         for key, title, command in [('open', '查看 / 打开', self.open_selected), ('restore', '恢复这个快照', self.restore),
                                      ('daily_add', '加入每日存档', self.add_daily), ('daily_primary', '设为当天主存档', self.primary_daily),
+                                     ('daily_move', '更改日期', self.move_daily),
                                      ('note', '写备注', self.note), ('delete', '删除这条档案', self.delete),
                                      ('expand', '展开所有窗口', lambda: self.expand_windows(True)),
                                      ('collapse', '收起所有窗口', lambda: self.expand_windows(False))]:
@@ -339,7 +340,7 @@ class App:
             if view == 'snapshots':
                 keys = ('open', 'daily_add', 'restore', 'note', 'delete')
             elif view == 'daily':
-                keys = ('open', 'daily_primary', 'restore', 'note', 'delete')
+                keys = ('open', 'daily_move', 'daily_primary', 'restore', 'note', 'delete')
             self.action_buttons['open'].configure(text='查看选中快照' if view == 'daily' else '查看快照' if view == 'snapshots' else '打开选中网页')
             self.action_buttons['restore'].configure(text='恢复选中网页' if view == 'daily' else '恢复这个快照')
         for key in keys:
@@ -528,6 +529,16 @@ class App:
         if self.view=='daily' and row:
             self.engine.submit('daily_primary',entry_id=row['entry_id'])
 
+    def move_daily(self):
+        from archive_date import ask_archive_date
+        row = self.selected()
+        if self.view != 'daily' or not row:
+            self.message_var.set('请先选中一份每日存档。')
+            return
+        day = ask_archive_date(self.root, row['day'], desktop=False)
+        if day is not None and day != row['day']:
+            self.engine.submit('daily_move', view='daily', id=row['entry_id'], day=day)
+
     def selected(self):
         if self.view == 'tabs':
             return self.browser_panes[self.active_browser].selected() if self.active_browser else None
@@ -702,6 +713,15 @@ class App:
                     self.message_var.set(f"已请求恢复 {event['opened']} 组工作窗口。")
                     if event['messages']:
                         messagebox.showinfo('桌面窗口恢复结果', '\n'.join(event['messages'])[:12000], parent=self.root)
+                elif kind == 'archive_moved':
+                    if event['view'] == 'workspace_daily':
+                        self.daily_workspace_pane.query.set('')
+                        self.daily_workspace_pane.day.set(event['day'])
+                    else:
+                        self.search_var.set(''); self.day_var.set(event['day'])
+                        self.pending_daily_selection = 'day:' + event['day']
+                    if self.view == event['view']:
+                        self.refresh()
                 elif kind == 'daily_changed':
                     self.pending_daily_selection='day:'+event['day']
                     if not event.get('primary'):

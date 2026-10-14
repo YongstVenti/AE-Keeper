@@ -56,9 +56,11 @@ class WorkspacePane:
         ttk.Button(filters, text='查找存档', command=self.refresh).pack(side='left')
         ttk.Button(filters, text='清空筛选', style='Quiet.TButton', command=self.clear).pack(side='left', padx=8)
         body = ttk.Frame(self.frame, style='Rounded.TFrame', padding=12); body.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(body, columns=('time', 'mode', 'counts', 'note'), show='headings', selectmode='browse', height=2)
-        for col, title, width in [('time', '保存时间', 210), ('mode', '保存方式', 140),
-                                  ('counts', '窗口 / 文件夹标签 / 终端会话', 420), ('note', '备注', 280)]:
+        columns = ('day', 'time', 'counts', 'note') if daily else ('time', 'mode', 'counts', 'note')
+        self.tree = ttk.Treeview(body, columns=columns, show='headings', selectmode='browse', height=2)
+        headings = ([('day', '归档日期', 140), ('time', '实际保存时间', 210)] if daily else
+                    [('time', '保存时间', 210), ('mode', '保存方式', 140)])
+        for col, title, width in headings + [('counts', '窗口 / 文件夹标签 / 终端会话', 420), ('note', '备注', 280)]:
             self.tree.heading(col, text=title); self.tree.column(col, width=width, minwidth=100, stretch=col in ('counts', 'note'))
         scroll = ttk.Scrollbar(body, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -66,6 +68,8 @@ class WorkspacePane:
         self.tree.bind('<Double-1>', lambda event: self.preview())
         actions = ttk.Frame(self.frame); actions.pack(fill='x', pady=(12, 0))
         ttk.Button(actions, text='查看并选择恢复', command=self.preview).pack(side='left')
+        if daily:
+            ttk.Button(actions, text='更改日期', command=self.move_date).pack(side='left', padx=(10, 0))
         ttk.Button(actions, text='写备注', command=self.note).pack(side='left', padx=10)
         ttk.Button(actions, text='删除这份存档', style='Quiet.TButton', command=self.delete).pack(side='left')
         self.count = ttk.Label(actions, text='', style='Muted.TLabel'); self.count.pack(side='right')
@@ -88,6 +92,8 @@ class WorkspacePane:
             iid = str(row['id']); n, tabs, sessions = workspace_counts(row['payload'])
             values = (time_text(row['time']), '当天最晚一份' if self.daily else {'auto': '当天自动最新', 'previous': '上次运行保留', 'manual': '手动保留'}[row['origin']],
                       f'{n} 个窗口 · {tabs} 个文件夹标签 · {sessions} 个终端会话', row['note'])
+            if self.daily:
+                values = (row['day'], time_text(row['time']), values[2], row['note'])
             if self.tree.exists(iid):
                 self.tree.item(iid, values=values)
             else:
@@ -193,6 +199,16 @@ class WorkspacePane:
             if text is not None:
                 self.engine.submit('note', view='workspaces', id=row['id'], text=text)
                 self.refresh()
+
+    def move_date(self):
+        from archive_date import ask_archive_date
+        row = self.selected()
+        if not row:
+            self.message.set('请先选中一份每日桌面存档。')
+            return
+        day = ask_archive_date(self.frame, row['day'], desktop=True)
+        if day is not None and day != row['day']:
+            self.engine.submit('daily_move', view='workspace_daily', id=row['id'], day=day)
 
     def delete(self):
         from tkinter import messagebox

@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -313,6 +314,41 @@ class Archive:
             self._set_primary(row[0], eid)
             self._daily_capacity()
 
+    def move_daily(self, view, rid, day):
+        """Change the archive date, keeping capture times and content intact."""
+        self._valid_day(day)
+        with self.db:
+            if view == 'workspace_daily':
+                row = self.db.execute('SELECT day FROM workspaces WHERE id=?', (rid,)).fetchone()
+                if not row:
+                    raise ValueError('这份桌面存档已不存在。')
+                if row[0] != day:
+                    # A moved snapshot is intentional; the next automatic save
+                    # must create its own row rather than overwrite this one.
+                    self.db.execute("UPDATE workspaces SET day=?,origin='manual' WHERE id=?", (day, rid))
+                return
+            if view != 'daily':
+                raise ValueError('只能更改每日存档的日期。')
+            row = self.db.execute('SELECT day FROM daily_entries WHERE id=?', (rid,)).fetchone()
+            if not row:
+                raise ValueError('这份浏览器存档已不存在。')
+            source = row[0]
+            if source == day:
+                return
+            root = self.db.execute('SELECT primary_entry,primary_locked FROM daily_archives WHERE day=?', (source,)).fetchone()
+            self.db.execute("UPDATE daily_entries SET day=?,origin='manual' WHERE id=?", (day, rid))
+            if root and root[0] == rid:
+                alternative = self.db.execute('SELECT id FROM daily_entries WHERE day=? ORDER BY last_seen DESC,id DESC LIMIT 1', (source,)).fetchone()
+                if alternative:
+                    self._set_primary(source, alternative[0], bool(root[1]))
+                else:
+                    self.db.execute('DELETE FROM daily_archives WHERE day=?', (source,))
+            target = self.db.execute('SELECT primary_entry FROM daily_archives WHERE day=?', (day,)).fetchone()
+            if target:
+                self.db.execute("UPDATE daily_entries SET origin='manual' WHERE id=?", (target[0],))
+            self._set_primary(day, rid, True)
+            self._daily_capacity()
+
     def _daily_capacity(self):
         if self.bytes('daily_archives') + self.bytes('snapshots') > self.settings()['limit_mb'] * 1048576 * .5:
             raise ValueError('快照容量不足，本次操作已回滚，请先提高容量上限。')
@@ -366,7 +402,8 @@ class Archive:
         if view in ('workspaces', 'workspace_daily'):
             if limit <= 0:
                 return []
-            rows = self.db.execute('SELECT id,day,last_seen,CAST(payload AS BLOB) AS reference,note,origin FROM workspaces ORDER BY last_seen DESC,id DESC').fetchall()
+            order = 'day DESC,last_seen DESC,id DESC' if view == 'workspace_daily' else 'last_seen DESC,id DESC'
+            rows = self.db.execute('SELECT id,day,last_seen,CAST(payload AS BLOB) AS reference,note,origin FROM workspaces ORDER BY ' + order).fetchall()
             result = []
             seen_days = set()
             for r in rows:
@@ -500,8 +537,8 @@ class Archive:
             for entry in workspaces:
                 day = str(entry['day']); self._valid_day(day)
                 stamp = float(entry['last_seen'])
-                if day != day_key(stamp):
-                    raise ValueError('工作现场日期不一致。')
+                if not math.isfinite(stamp) or stamp < 0:
+                    raise ValueError('桌面存档保存时间无效。')
                 payload = clean_workspace(json.loads(entry['payload']), imported=True)
                 data = json.dumps(payload, ensure_ascii=False)
                 note = str(entry.get('note', ''))[:2000]
