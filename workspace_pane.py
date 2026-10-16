@@ -101,6 +101,14 @@ class WorkspacePane:
             self.tree.move(iid, '', index)
         self.tree.selection_set([iid for iid in selection if iid in self.rows])
         self.tree.yview_moveto(position)
+        pending_day = getattr(self, 'pending_day', None)
+        if pending_day:
+            self.pending_day = None
+            target = next((str(row['id']) for row in rows if row['day'] == pending_day), None)
+            if target:
+                self.tree.selection_set(target)
+                self.tree.focus(target)
+                self.tree.see(target)
         self.count.configure(text=f'{len(rows)} 天存档' if self.daily else f'{len(rows)} 份存档')
 
     def selected(self):

@@ -23,10 +23,12 @@ def site_label(row):
 
 class BrowserPane:
     def __init__(self, parent, browser, heading_font, status_var=None,
-                 connect=None, disconnect=None, on_select=None, on_open=None):
+                 connect=None, disconnect=None, on_select=None, on_open=None, on_restore_window=None):
         self.browser, self.on_select, self.on_open = browser, on_select, on_open
         self.rows, self.window_names, self.rendered_ids = {}, {}, ()
         self.window_folds = {}
+        self.on_restore_window = on_restore_window
+        self.window_ids = {}
         self.accent = '#0D766D' if browser == 'Edge' else '#3F6F83'
         self.frame = ttk.Frame(parent, style='Rounded.TFrame', padding=(8, 8))
         header = tk.Frame(self.frame, bg='#ffffff')
@@ -60,6 +62,9 @@ class BrowserPane:
         self.tree.bind('<<TreeviewSelect>>', self._select)
         self.tree.bind('<Double-1>', self._open)
         self.tree.bind('<Return>', self._open)
+        if on_restore_window:
+            self.window_menu = tk.Menu(self.tree, tearoff=False, font=(heading_font[0], 11))
+            self.tree.bind('<Button-3>', self._context_menu)
         self.detail = tk.Label(self.frame, text='展开窗口查看标签页；双击网页即可打开', fg=MUTED, bg='#ffffff',
                                anchor='w', justify='left', wraplength=460, height=2)
         self.detail.pack(fill='x', padx=18, pady=(6, 8))
@@ -77,6 +82,25 @@ class BrowserPane:
         row = self.selected()
         if row and self.on_open:
             self.on_open(row)
+
+    def _context_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        group = iid if iid in self.window_ids else self.tree.parent(iid)
+        if group not in self.window_ids:
+            return
+        window = self.window_ids[group]
+        self.tree.selection_set(group)
+        self.tree.focus(group)
+        self.window_menu.delete(0, 'end')
+        self.window_menu.add_command(label='恢复这个窗口的全部标签页',
+                                     command=lambda: self.on_restore_window(self.browser, window))
+        try:
+            self.window_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.window_menu.grab_release()
+        return 'break'
 
     def selected(self):
         selected = self.tree.selection()
@@ -105,6 +129,7 @@ class BrowserPane:
         # Anchor the first visible row so insertion above it does not shift the view.
         anchor = self.tree.identify_row(self.tree.winfo_height() and 45)
         wanted_groups = {f'window:{self.browser}:{w}' for w in groups}
+        self.window_ids = {f'window:{self.browser}:{w}': w for w in groups}
         self.rows = {f"tab:{self.browser}:{r['target']}": r for r in shown}
         wanted = wanted_groups | set(self.rows)
         for group in self.tree.get_children():

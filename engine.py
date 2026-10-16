@@ -4,6 +4,7 @@ import queue
 import subprocess
 import threading
 import time
+from urllib.parse import urlsplit
 from pathlib import Path
 from cdp import BrowserConnection
 from browser_setup import open_settings, SETTINGS_URLS
@@ -11,6 +12,18 @@ from storage import Archive, safe_url
 from desktop_windows import capture_desktop, restore_desktop
 from workspace_model import demo_workspace, workspace_counts
 from window_previews import attach_previews
+
+
+def restorable_tab_url(url):
+    if safe_url(url):
+        return True
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return parsed.scheme.lower() == 'file' and parsed.netloc.lower() in ('', 'localhost') and parsed.path.startswith('/')
+    except ValueError:
+        return False
 
 
 def default_roots():
@@ -328,9 +341,15 @@ class Engine(threading.Thread):
             snapshot = self.archive.daily_entry(values['entry_id']) if view == 'daily' and values.get('entry_id') else next((r for r in self.archive.listing(view, limit=100000) if r['id'] == values['id']), None)
             if snapshot is None:
                 raise ValueError('这个快照已不存在。')
+            selected_browser, selected_window = values.get('browser'), values.get('window')
+            scoped = 'browser' in values or 'window' in values
+            if scoped and (selected_browser not in ('Chrome', 'Edge') or selected_window is None):
+                raise ValueError('请选择一个有效的浏览器窗口。')
             groups = {}
             for tab in snapshot['tabs']:
-                if safe_url(tab['url']):
+                if scoped and (tab['browser'] != selected_browser or tab['window'] != selected_window):
+                    continue
+                if restorable_tab_url(tab['url']):
                     groups.setdefault((tab['browser'], tab['window']), []).append(tab['url'])
             count = 0
             for (browser, window), urls in groups.items():
@@ -349,7 +368,7 @@ class Engine(threading.Thread):
                 if batch:
                     subprocess.Popen([browser_exe(browser), '--new-window', *batch])
                     count += len(batch)
-            self.emit('message', text=f'已请求在原浏览器的新窗口打开{count}个网页。内部页面未自动恢复。')
+            self.emit('message', text=f'已请求在{selected_browser if scoped else "原浏览器"}的新窗口打开{count}个网页。内部页面未自动恢复。')
         self.state()
 
     def run(self):

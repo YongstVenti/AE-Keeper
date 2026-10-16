@@ -556,7 +556,7 @@ class App:
             win.minsize(1020, 500)
             win.configure(bg=BG)
             apply_window_effects(win)
-            ttk.Label(win, text='保存于 ' + fmt_time(row['time']) + ' · 点击窗口展开，双击网页打开',
+            ttk.Label(win, text='保存于 ' + fmt_time(row['time']) + ' · 点击窗口展开，双击网页打开，右键窗口恢复全部标签页',
                       style='Muted.TLabel').pack(anchor='w', padx=20, pady=15)
             body = ttk.Frame(win, padding=(20, 0, 20, 15))
             body.pack(fill='both', expand=True)
@@ -565,12 +565,18 @@ class App:
             body.rowconfigure(0, weight=1)
             win.browser_panes = {}
             for column, browser in enumerate(('Edge', 'Chrome')):
-                pane = BrowserPane(body, browser, (self.heading_family, 18), on_open=self.open_tab)
+                pane = BrowserPane(body, browser, (self.heading_family, 18), on_open=self.open_tab,
+                                   on_restore_window=lambda b, w, snapshot=row, view=self.view:
+                                       self.restore_browser_window(snapshot, view, b, w))
                 pane.frame.grid(row=0, column=column, sticky='nsew', padx=(0, 7) if column == 0 else (7, 0))
                 pane.update(row['tabs'])
                 win.browser_panes[browser] = pane
         else:
             self.open_tab(row)
+
+    def restore_browser_window(self, snapshot, view, browser, window):
+        self.engine.submit('restore', id=snapshot['id'], view=view, entry_id=snapshot.get('entry_id'),
+                           browser=browser, window=window)
 
     def restore(self):
         row = self.selected()
@@ -714,14 +720,7 @@ class App:
                     if event['messages']:
                         messagebox.showinfo('桌面窗口恢复结果', '\n'.join(event['messages'])[:12000], parent=self.root)
                 elif kind == 'archive_moved':
-                    if event['view'] == 'workspace_daily':
-                        self.daily_workspace_pane.query.set('')
-                        self.daily_workspace_pane.day.set(event['day'])
-                    else:
-                        self.search_var.set(''); self.day_var.set(event['day'])
-                        self.pending_daily_selection = 'day:' + event['day']
-                    if self.view == event['view']:
-                        self.refresh()
+                    self.archive_moved(event)
                 elif kind == 'daily_changed':
                     self.pending_daily_selection='day:'+event['day']
                     if not event.get('primary'):
@@ -739,6 +738,19 @@ class App:
         except queue.Empty:
             pass
         self.root.after(150, self.poll)
+
+    def archive_moved(self, event):
+        # Locate the result by selection, never by silently hiding other days.
+        if event['view'] == 'workspace_daily':
+            self.daily_workspace_pane.query.set('')
+            self.daily_workspace_pane.day.set('')
+            self.daily_workspace_pane.pending_day = event['day']
+        else:
+            self.search_var.set('')
+            self.day_var.set('')
+            self.pending_daily_selection = 'day:' + event['day']
+        if self.view == event['view']:
+            self.refresh()
 
     def make_tray(self):
         try:
