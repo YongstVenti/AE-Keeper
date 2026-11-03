@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdp import BrowserConnection, TAB_FILTER, PAGE_FILTER
+from cdp import BrowserReadTimeout
+from unittest.mock import Mock
 
 
 def target(identifier, kind='tab', context='normal', url=None, **extra):
@@ -49,6 +51,20 @@ class InventoryConnection(BrowserConnection):
 
 
 class CdpInventoryTests(unittest.TestCase):
+    def test_missing_container_url_uses_unique_normal_profile_child_without_activation(self):
+        empty=target('sleep',embedderData={'tabStripIndex':0});empty['url']=''
+        c=InventoryConnection([empty],pages=[target('child',kind='page',parentId='sleep'),
+            target('private-child',kind='page',context='private',parentId='sleep')])
+        data=c._read_inventory()
+        self.assertEqual(data[0]['url'],'https://example.com/child')
+        self.assertEqual(data[0]['target'],'sleep')
+
+    def test_window_lookup_timeout_stops_before_sending_more_requests(self):
+        c=InventoryConnection([target(str(i)) for i in range(100)],windows={'0':BrowserReadTimeout('busy')})
+        original=c.begin;c.begin=Mock(side_effect=original)
+        with self.assertRaises(BrowserReadTimeout):c._read_inventory()
+        self.assertEqual(c.begin.call_count,1)
+
     def test_unloaded_container_is_present_without_page_and_index_zero_survives(self):
         connection = InventoryConnection([
             target('sleeping', embedderData={'tabStripIndex': 1, 'tabActive': False}),

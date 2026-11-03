@@ -175,7 +175,9 @@ class App:
                                status_var=self.connection_vars[browser],
                                connect=lambda b=browser: self.connect(b),
                                disconnect=lambda b=browser: self.engine.submit('disconnect', browser=b),
-                               on_select=self.select_browser, on_open=self.open_tab)
+                               on_select=self.select_browser, on_open=self.open_tab,
+                               on_recover=lambda window, b=browser: self.start_recovery(b, window),
+                               on_pause=lambda: self.engine.submit('recover_pause'), on_recovery_settings=self.recovery_settings)
             pane.frame.grid(row=0, column=column, sticky='nsew', padx=(0, 8) if column == 0 else (8, 0))
             self.browser_panes[browser] = pane
         self.tree_frame = ttk.Frame(self.content, style='Rounded.TFrame',padding=12)
@@ -232,6 +234,41 @@ class App:
                 messagebox.showerror('打开失败', str(error), parent=self.root)
         else:
             self.message_var.set('这是本地文件或浏览器内部页面，请在原浏览器中查看。')
+
+    def start_recovery(self, browser, window=None):
+        if self.demo:
+            self.message_var.set('演示模式不会激活真实标签页。')
+            return
+        s = self.settings
+        if messagebox.askyesno('逐个补读未读网址',
+                f"将切换到 {browser} 的已有未读标签页，可能唤醒并加载网页。\n"
+                f"本批最多 {s.get('recovery_batch',5)} 个，每个之间等待 {s.get('recovery_interval',8)} 秒。\n"
+                '不会新建、刷新、关闭或丢弃标签页；资源紧张或探测超时会暂停。\n'
+                '已发出的页面加载不会因暂停而被强行终止。\n\n'
+                '请只在浏览器能正常操作时启动；无法保证唤醒页面后绝不卡顿。\n开始这批补读？', parent=self.root):
+            self.engine.submit('recover_start', browser=browser, window=window)
+
+    def recovery_settings(self):
+        win = tk.Toplevel(self.root); win.title('逐个补读设置'); win.configure(bg=BG)
+        apply_icon(win); apply_window_effects(win)
+        body = ttk.Frame(win, padding=24); body.pack(fill='both', expand=True)
+        variables = {}
+        for i, (key, title, default) in enumerate([
+                ('recovery_batch', '每批最多标签数（1—10）', 5),
+                ('recovery_interval', '每个之间等待秒数（3—60）', 8),
+                ('recovery_timeout', '单页读取超时秒数（8—60）', 20),
+                ('recovery_memory_mb', '最低可用内存 MB（1024—8192）', 3072)]):
+            ttk.Label(body, text=title).grid(row=i, column=0, sticky='w', pady=8)
+            variables[key] = tk.StringVar(value=str(self.settings.get(key, default)))
+            ttk.Entry(body, textvariable=variables[key], width=12).grid(row=i, column=1, padx=12)
+        ttk.Label(body, text='CPU 达到 85% 或连续两页失败也会暂停。\n仅手动启动，不关闭已唤醒的网页来释放内存。', style='Muted.TLabel').grid(row=4,column=0,columnspan=2,pady=12)
+        def save():
+            try:
+                values = {k: int(v.get()) for k,v in variables.items()}
+            except ValueError:
+                messagebox.showerror('设置未保存', '请输入整数。', parent=win); return
+            self.engine.submit('settings', value=values); win.destroy()
+        ttk.Button(body, text='保存设置', command=save).grid(row=5,column=1,sticky='e')
 
     def connect(self, browser):
         if self.demo:
@@ -688,7 +725,7 @@ class App:
                     self.workspace_pane.hint.configure(text=f"{scope} · 每 {self.settings['interval']} 秒更新当天一份 · 最小化时沿用上次可读预览，手动拍摄可更新全部画面")
                     for browser in self.connection_vars:
                         status = event['status'][browser]
-                        if status.startswith('已连接'):
+                        if status.startswith('已连接') and '读取暂缓' not in status:
                             status = '已连接 · ' + (f"每 {self.settings['interval']} 秒自动保存" if self.settings['enabled'] else '自动保存已关闭')
                         self.connection_vars[browser].set(status)
                     total = sum(v['bytes'] for v in self.stats.values()) / 1048576
@@ -726,6 +763,11 @@ class App:
                     if not event.get('primary'):
                         self.search_var.set('');self.day_var.set('');self.switch('daily')
                     else:self.refresh()
+                elif kind == 'recovery':
+                    pane = self.browser_panes.get(event['browser'])
+                    if pane:
+                        pane.recovery_status.configure(text=event['text'])
+                    self.message_var.set(event['text'])
                 elif kind == 'message':
                     self.message_var.set(event['text'])
                     self.refresh()

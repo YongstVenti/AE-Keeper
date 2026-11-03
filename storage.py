@@ -14,7 +14,8 @@ DEFAULTS = {'enabled': True, 'interval': 60, 'mode': 'auto', 'limit_mb': 100, 'r
             'workspace_enabled': True, 'workspace_limit_mb': 20,
             'workspace_include_minimized': True, 'workspace_previews': True,
             'workspace_hd': False, 'workspace_hd_edge': 1920, 'workspace_image_mode': 'lossless',
-            'workspace_thumb_edge': 640}
+            'workspace_thumb_edge': 640, 'recovery_batch': 5, 'recovery_interval': 8,
+            'recovery_timeout': 20, 'recovery_memory_mb': 3072}
 
 
 def safe_url(value):
@@ -104,6 +105,9 @@ class Archive:
             raise ValueError('图片保存方式无效。')
         s['workspace_hd_edge'] = int(s['workspace_hd_edge'])
         s['workspace_thumb_edge'] = int(s['workspace_thumb_edge'])
+        for key, low, high in [('recovery_batch', 1, 10), ('recovery_interval', 3, 60),
+                               ('recovery_timeout', 8, 60), ('recovery_memory_mb', 1024, 8192)]:
+            s[key] = max(low, min(high, int(s[key])))
         if s['mode'] not in ('auto', 'all', 'snapshots'):
             raise ValueError('记录模式无效')
         if self.bytes('bookmarks') > s['limit_mb'] * 1048576 * .15:

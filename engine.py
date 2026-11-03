@@ -6,7 +6,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 from pathlib import Path
-from cdp import BrowserConnection
+from cdp import BrowserConnection, BrowserReadTimeout
+from tab_recovery import TabRecovery
 from browser_setup import open_settings, SETTINGS_URLS
 from storage import Archive, safe_url
 from desktop_windows import capture_desktop, restore_desktop
@@ -92,8 +93,13 @@ class Engine(threading.Thread):
         self.setup_opened = set()
         self.last_connection_check = 0
         self.connection_deadline = 0
+        self.recovery = TabRecovery()
+        self.scan_complete = False
+        self.busy_until = 0
 
     def submit(self, action, **values):
+        if action == 'recover_pause':
+            self.recovery.request_pause()
         self.commands.put((action, values))
 
     def emit(self, kind, **values):
@@ -112,6 +118,7 @@ class Engine(threading.Thread):
         if self.demo:
             return
         current = []
+        self.scan_complete = True
         for browser, client in list(self.clients.items()):
             try:
                 rows = client.tabs()
@@ -119,19 +126,26 @@ class Engine(threading.Thread):
                 self.observe(rows)
                 windows = len({row['window'] for row in rows})
                 self.status[browser] = f'已连接 · {windows} 个窗口 · {len(rows)} 个标签页'
+            except BrowserReadTimeout:
+                self.scan_complete = False
+                self.busy_until = time.monotonic() + 30
+                current.extend({**r, 'source': '上次读到 · 等待浏览器回应'} for r in self.current if r['browser'] == browser)
+                self.status[browser] = '已连接 · 浏览器繁忙，读取暂缓；不重复授权'
             except Exception:
+                self.scan_complete = False
                 client.close()
                 self.clients.pop(browser, None)
                 self.status[browser] = '连接已断开，点击重新连接'
         self.current = sorted(current, key=lambda r: (r['browser'], r['window'], r.get('index', float('inf')), r['target']))
         self.last_scan = time.monotonic()
 
-    def save(self):
-        self.scan()
+    def save(self, force_scan=True):
+        if force_scan or time.monotonic() - self.last_scan > 3:
+            self.scan()
         connected = sorted(self.clients) if not self.demo else ['Chrome', 'Edge']
         # Legacy page-only inventory can omit sleeping tabs. Daily archives
         # require full tab-container enumeration in both browser connections.
-        complete = self.demo or (set(connected) == {'Chrome', 'Edge'} and all(
+        complete = self.demo or (self.scan_complete and set(connected) == {'Chrome', 'Edge'} and all(
             client.inventory.get('target_type') == 'tab' and
             client.inventory.get('unmapped_tabs', 0) == 0 and
             client.inventory.get('with_tab_index') == client.inventory.get('tabs') and
@@ -275,6 +289,16 @@ class Engine(threading.Thread):
             self.emit('message', text=('浏览器快照及桌面窗口已保存。' if browser_saved and desktop_saved else
                                       '桌面窗口已保存；浏览器尚未连接。' if desktop_saved else
                                       '浏览器快照已保存；没有可保存的工作窗口。' if browser_saved else '当前没有可保存的窗口。'))
+        elif action == 'recover_start':
+            browser = values['browser']
+            if browser not in self.clients:
+                raise ValueError('请先手动连接对应浏览器；补读不会自动申请授权。')
+            rows = self.current if values.get('window') is None else [r for r in self.current if r['window'] == values['window']]
+            self.recovery.start(browser, rows, self.archive.settings())
+            self.emit('recovery', browser=browser, text=self.recovery.message, running=self.recovery.running)
+        elif action == 'recover_pause':
+            self.recovery.pause('已手动暂停；已发出的页面加载不会被强行终止')
+            self.emit('recovery', browser=self.recovery.browser, text=self.recovery.message, running=False)
         elif action == 'workspace_save':
             self.save_workspace(manual=not values.get('daily', False), interactive=True)
         elif action == 'workspace_enabled':
@@ -393,17 +417,40 @@ class Engine(threading.Thread):
                 if action:
                     self.handle(action, values)
                 if not self.demo:
+                    if self.recovery.running:
+                        import psutil
+                        before = self.recovery.message
+                        client = self.clients.get(self.recovery.browser)
+                        if client is None:
+                            self.recovery.pause('浏览器已断开，已暂停')
+                        else:
+                            self.recovery.step(client, self.recovery_url,
+                                (psutil.virtual_memory().available / 1048576, psutil.cpu_percent(interval=.1)))
+                        if self.recovery.message != before:
+                            self.emit('recovery', browser=self.recovery.browser, text=self.recovery.message, running=self.recovery.running)
+                            self.state()
+                        if not self.recovery.running:
+                            self.busy_until = time.monotonic() + 30
+                        # Avoid global scans, bulk snapshots and window-image
+                        # capture competing with the single-tab recovery queue.
+                        continue
                     self.check_connections()
                     for client in list(self.clients.values()):
                         self.observe(client.drain_events())
                     now = time.monotonic()
                     s = self.archive.settings()
-                    if now - self.last_scan >= 5:
+                    if now < self.busy_until:
+                        continue
+                    if now - self.last_scan >= 15:
                         self.scan()
                         self.state()
+                        if time.monotonic() < self.busy_until:
+                            continue
                     if s['enabled'] and self.current and now - self.last_capture >= s['interval']:
-                        self.save()
+                        self.save(force_scan=False)
                         self.state()
+                        if time.monotonic() < self.busy_until:
+                            continue
                     if s['workspace_enabled'] and now - self.last_workspace_capture >= s['interval']:
                         # No browser connection or permission required for desktop metadata.
                         self.last_workspace_capture = now
@@ -416,3 +463,11 @@ class Engine(threading.Thread):
         for client in self.clients.values():
             client.close()
         self.archive.db.close()
+
+    def recovery_url(self, row):
+        for index, old in enumerate(self.current):
+            if old['browser'] == row['browser'] and old['target'] == row['target'] and old['window'] == row['window']:
+                self.current[index] = row
+                self.observe([row])
+                self.archive.capture(self.current, sorted(self.clients), complete=False)
+                return

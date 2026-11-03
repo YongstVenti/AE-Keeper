@@ -11,6 +11,9 @@ from native_metadata import NativeMetadata, merge_windows, signature
 
 TAB_FILTER = [{'type': 'tab', 'exclude': False}, {'exclude': True}]
 PAGE_FILTER = [{'type': 'page', 'exclude': False}, {'exclude': True}]
+class BrowserReadTimeout(RuntimeError):
+    pass
+
 EVENT_FILTER = [{'type': 'tab', 'exclude': False}, {'type': 'page', 'exclude': False}, {'exclude': True}]
 
 
@@ -122,7 +125,7 @@ class BrowserConnection:
         except queue.Empty:
             with self.lock:
                 self.pending.pop(token, None)
-            raise RuntimeError('等待浏览器回应超时。请确认浏览器的连接授权提示。') from None
+            raise BrowserReadTimeout('浏览器暂未回应，本次读取已暂停；不需要反复申请授权。') from None
         if 'error' in response:
             raise RuntimeError(response['error'].get('message', '浏览器未允许这个操作。'))
         return response.get('result', {})
@@ -130,15 +133,17 @@ class BrowserConnection:
     def call(self, method, params=None, timeout=10):
         return self.finish(self.begin(method, params), timeout)
 
-    def session_call(self, session, method, params=None):
-        return self.finish(self.begin(method, params, session=session))
+    def session_call(self, session, method, params=None, timeout=3):
+        return self.finish(self.begin(method, params, session=session), timeout=timeout)
 
     def allowed(self, target):
         return target.get('type') in ('tab', 'page') and not target.get('subtype') and (self.include_all_profiles or target.get('browserContextId') in self.normal_contexts)
 
     def tabs(self):
         rows = self._read_inventory()
-        if self.browser == 'Edge' and any(not r['url'] for r in rows):
+        if (self.browser == 'Edge' and any(not r['url'] for r in rows)
+                and time.monotonic() - getattr(self, 'last_metadata_attempt', -1000) >= 30):
+            self.last_metadata_attempt = time.monotonic()
             try:
                 windows = self.native_metadata.windows()
                 # The browser can move/close/navigate tabs during this read.
@@ -162,24 +167,33 @@ class BrowserConnection:
         # only live page renderers. Sleeping/discarded tabs must be enumerated
         # at the container level, without activating or loading their pages.
         try:
-            candidates = self.call('Target.getTargets', {'filter': TAB_FILTER}).get('targetInfos', [])
+            candidates = self.call('Target.getTargets', {'filter': TAB_FILTER}, timeout=2).get('targetInfos', [])
+        except BrowserReadTimeout:
+            raise
         except RuntimeError:
             candidates = []  # Older embedders may not support target filters.
         kind = 'tab' if any(t.get('type') == 'tab' for t in candidates) else 'page'
         if kind == 'page':
-            candidates = self.call('Target.getTargets', {'filter': PAGE_FILTER}).get('targetInfos', [])
-        self.private_contexts.update(self.call('Target.getBrowserContexts').get('browserContextIds', []))
+            candidates = self.call('Target.getTargets', {'filter': PAGE_FILTER}, timeout=2).get('targetInfos', [])
+        self.private_contexts.update(self.call('Target.getBrowserContexts', timeout=2).get('browserContextIds', []))
         self.normal_contexts.difference_update(self.private_contexts)
         targets = list({t['targetId']: t for t in candidates if t.get('type') == kind and self.allowed(t)}.values())
-        handles = [(t, self.begin('Browser.getWindowForTarget', {'targetId': t['targetId']})) for t in targets]
+        deadline = time.monotonic() + 6
         rows = []
         without_window = 0
         unmapped_tabs = 0
-        for target, handle in handles:
+        for target in targets:
+            # Bound concurrency and the entire inventory's wait time. Sending
+            # hundreds of pending commands can worsen an overloaded browser.
+            if time.monotonic() >= deadline:
+                raise BrowserReadTimeout('标签列表读取超时，稍后再试。')
+            handle = self.begin('Browser.getWindowForTarget', {'targetId': target['targetId']})
             index_hint = (target.get('embedderData') or {}).get('tabStripIndex')
             visible_tab = isinstance(index_hint, int) and not isinstance(index_hint, bool) and index_hint >= 0
             try:
-                window = self.finish(handle).get('windowId')
+                window = self.finish(handle, timeout=max(.05, min(2, deadline - time.monotonic()))).get('windowId')
+            except BrowserReadTimeout:
+                raise
             except RuntimeError:
                 without_window += 1
                 unmapped_tabs += int(visible_tab)
@@ -200,6 +214,16 @@ class BrowserConnection:
                 if field in metadata:
                     row[key] = metadata[field]
             rows.append(row)
+        if any(not r['url'] for r in rows):
+            pages = self.call('Target.getTargets', {'filter': PAGE_FILTER}, timeout=2).get('targetInfos', [])
+            children = {}
+            for page in pages:
+                if self.allowed(page) and page.get('parentId') and page.get('url'):
+                    children.setdefault(page['parentId'], []).append(page)
+            for row in rows:
+                matches = children.get(row['target'], [])
+                if not row['url'] and len(matches) == 1:
+                    row.update(url=matches[0]['url'], title=matches[0].get('title') or matches[0]['url'], source='实时连接 · 页面元数据')
         rows.sort(key=lambda r: (r['window'], r.get('index', float('inf')), r['target']))
         self.inventory = {'target_type': kind, 'candidates': len(candidates), 'allowed': len(targets),
                           'excluded': len(candidates) - len(targets), 'without_window': without_window,
@@ -207,6 +231,18 @@ class BrowserConnection:
                           'unmapped_tabs': unmapped_tabs,
                           'with_tab_index': sum('index' in r for r in rows)}
         return rows
+
+    def recovery_info(self, target):
+        info = self.call('Target.getTargetInfo', {'targetId': target}, timeout=2)['targetInfo']
+        if info.get('targetId') != target or not self.allowed(info):
+            raise RuntimeError('标签身份或个人资料范围已改变，停止补读。')
+        window = self.call('Browser.getWindowForTarget', {'targetId': target}, timeout=2)['windowId']
+        if not info.get('url'):
+            pages = self.call('Target.getTargets', {'filter': PAGE_FILTER}, timeout=2).get('targetInfos', [])
+            matches = [p for p in pages if self.allowed(p) and p.get('parentId') == target and p.get('url')]
+            if len(matches) == 1:
+                info = matches[0]
+        return {'window': str(window), 'url': info.get('url', ''), 'title': info.get('title', '')}
 
     def drain_events(self):
         values = []

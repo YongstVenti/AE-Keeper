@@ -88,7 +88,7 @@ class NativeMetadata:
         # same normal profile as the CDP tab inventory, including private gates.
         candidates = c.call('Target.getTargets', {'filter': [
             {'type': 'browser_ui', 'exclude': False}, {'exclude': True}
-        ]}).get('targetInfos', [])
+        ]}, timeout=2).get('targetInfos', [])
         expected = 'edge://tab-search.top-chrome/'
         targets = [t for t in candidates if t.get('type') == 'browser_ui'
                    and t.get('url') == expected and not t.get('subtype')
@@ -98,7 +98,7 @@ class NativeMetadata:
         target = targets[0]['targetId']
         if self.target != target or self.session is None:
             self.close()
-            self.session = c.call('Target.attachToTarget', {'targetId': target, 'flatten': True})['sessionId']
+            self.session = c.call('Target.attachToTarget', {'targetId': target, 'flatten': True}, timeout=2)['sessionId']
             self.target = target
         result = c.session_call(self.session, 'Runtime.evaluate', {
             'expression': EDGE_EXPRESSION, 'awaitPromise': True, 'returnByValue': True

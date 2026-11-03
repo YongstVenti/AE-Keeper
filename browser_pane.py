@@ -23,11 +23,13 @@ def site_label(row):
 
 class BrowserPane:
     def __init__(self, parent, browser, heading_font, status_var=None,
-                 connect=None, disconnect=None, on_select=None, on_open=None, on_restore_window=None):
+                 connect=None, disconnect=None, on_select=None, on_open=None, on_restore_window=None,
+                 on_recover=None, on_pause=None, on_recovery_settings=None):
         self.browser, self.on_select, self.on_open = browser, on_select, on_open
         self.rows, self.window_names, self.rendered_ids = {}, {}, ()
         self.window_folds = {}
         self.on_restore_window = on_restore_window
+        self.on_recover = on_recover
         self.window_ids = {}
         self.accent = '#0D766D' if browser == 'Edge' else '#3F6F83'
         self.frame = ttk.Frame(parent, style='Rounded.TFrame', padding=(8, 8))
@@ -46,6 +48,13 @@ class BrowserPane:
             self.status = tk.Label(header, textvariable=status_var, fg=MUTED, bg='#ffffff', anchor='w',
                                    justify='left', wraplength=390)
             self.status.pack(fill='x', pady=(4, 0))
+        if on_recover:
+            tools = ttk.Frame(header, style='White.TFrame'); tools.pack(fill='x', pady=(6, 0))
+            ttk.Button(tools, text='逐个补读未读网址', style='Panel.Small.TButton', command=lambda: on_recover(None)).pack(side='left')
+            ttk.Button(tools, text='暂停', style='Panel.Quiet.TButton', command=on_pause).pack(side='left', padx=6)
+            ttk.Button(tools, text='补读设置', style='Panel.Quiet.TButton', command=on_recovery_settings).pack(side='left')
+            self.recovery_status = tk.Label(header, text='手动启动 · 一次处理一个标签页', fg=MUTED, bg='#ffffff', anchor='w', wraplength=420)
+            self.recovery_status.pack(fill='x', pady=(4, 0))
         body = ttk.Frame(self.frame, style='White.TFrame')
         body.pack(fill='both', expand=True, padx=10)
         self.tree = ttk.Treeview(body, columns=('site',), show='tree headings', selectmode='browse', height=1)
@@ -62,7 +71,7 @@ class BrowserPane:
         self.tree.bind('<<TreeviewSelect>>', self._select)
         self.tree.bind('<Double-1>', self._open)
         self.tree.bind('<Return>', self._open)
-        if on_restore_window:
+        if on_restore_window or on_recover:
             self.window_menu = tk.Menu(self.tree, tearoff=False, font=(heading_font[0], 11))
             self.tree.bind('<Button-3>', self._context_menu)
         self.detail = tk.Label(self.frame, text='展开窗口查看标签页；双击网页即可打开', fg=MUTED, bg='#ffffff',
@@ -94,8 +103,11 @@ class BrowserPane:
         self.tree.selection_set(group)
         self.tree.focus(group)
         self.window_menu.delete(0, 'end')
-        self.window_menu.add_command(label='恢复这个窗口的全部标签页',
-                                     command=lambda: self.on_restore_window(self.browser, window))
+        if getattr(self, 'on_restore_window', None):
+            self.window_menu.add_command(label='恢复这个窗口的全部标签页',
+                                         command=lambda: self.on_restore_window(self.browser, window))
+        if getattr(self, 'on_recover', None):
+            self.window_menu.add_command(label='补读这个窗口的未读网址', command=lambda: self.on_recover(window))
         try:
             self.window_menu.tk_popup(event.x_root, event.y_root)
         finally:
