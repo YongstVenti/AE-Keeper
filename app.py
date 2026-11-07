@@ -16,6 +16,7 @@ from tkinter import font as tkfont
 from engine import Engine, browser_exe
 from browser_pane import BrowserPane
 from workspace_pane import WorkspacePane
+from runtime_paths import resolve_paths, prepare_runtime, startup_command
 from rounded_theme import install_rounded_theme
 from window_effects import apply_window_effects
 from branding import NAME, TITLE, BG, WHITE, INK, MUTED, ACCENT as GREEN, HOVER, TINT, SELECTED_INK, apply_icon, logo_photo, logo_image
@@ -46,7 +47,7 @@ def set_startup(enabled):
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Run') as key:
         if enabled:
-            winreg.SetValueEx(key, 'BrowseTraceDesktop', 0, winreg.REG_SZ, f'"{sys.executable}" --tray')
+            winreg.SetValueEx(key, 'BrowseTraceDesktop', 0, winreg.REG_SZ, startup_command())
         else:
             try:
                 winreg.DeleteValue(key, 'BrowseTraceDesktop')
@@ -684,6 +685,7 @@ class App:
         ttk.Button(bar, text='导出完整备份', command=self.export).pack(side='left', padx=10)
         ttk.Button(bar, text='导入备份', command=self.import_backup).pack(side='left', padx=(0, 10))
         ttk.Button(bar, text='打开数据文件夹', command=lambda: os.startfile(str(self.folder))).pack(side='left')
+        ttk.Label(self.settings_frame, text=f'档案保存位置：{self.folder}\n截图临时文件与默认导出备份保存在同一上级目录。', style='Muted.TLabel', wraplength=1060).pack(anchor='w', pady=8)
 
     def save_settings(self, modes):
         try:
@@ -702,7 +704,9 @@ class App:
             messagebox.showerror('设置未保存', str(e), parent=self.root)
 
     def export(self):
-        path = filedialog.asksaveasfilename(parent=self.root, title='保存完整档案备份', initialfile=time.strftime('AE-Keeper-备份-%Y-%m-%d.json'), defaultextension='.json', filetypes=[('JSON备份', '*.json')])
+        exports = self.folder.parent / 'exports'
+        exports.mkdir(parents=True, exist_ok=True)
+        path = filedialog.asksaveasfilename(parent=self.root, title='保存完整档案备份', initialdir=str(exports), initialfile=time.strftime('AE-Keeper-备份-%Y-%m-%d.json'), defaultextension='.json', filetypes=[('JSON备份', '*.json')])
         if path:
             self.engine.submit('export', path=path)
 
@@ -910,7 +914,15 @@ def main(force_app=False):
     if not force_app and getattr(sys, 'frozen', False) and (args.install or '安装' in Path(sys.executable).stem):
         installer()
         return
-    folder = Path(args.data_dir) if args.data_dir else Path(os.environ['LOCALAPPDATA']) / 'BrowseTraceDesktop/data'
+    try:
+        paths = resolve_paths(args.data_dir)
+        prepare_runtime(paths)
+        folder = paths['data']
+    except (OSError, ValueError, TypeError) as error:
+        root = tk.Tk(); root.withdraw()
+        messagebox.showerror(APP_NAME, f'档案目录不可用，请检查配置的磁盘或保存位置。\n{error}\n不会改用其他磁盘新建空档案。', parent=root)
+        root.destroy()
+        return
     if os.name == 'nt':
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
         key = hashlib.sha256(str(folder.resolve()).encode()).hexdigest()[:20]

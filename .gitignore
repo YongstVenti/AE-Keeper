@@ -20,5 +20,8 @@ demo-data/
 *.key
 backups/
 profiles/
+temp/
+exports/
+ae-keeper-paths.json
 *.exe
 *.zip
